@@ -1,0 +1,5 @@
+# 核心运行：零第三方依赖（纯标准库即可离线跑通启发式质检与检索）。
+#
+# 可选：接入真实 LLM（OpenAI 兼容协议，可对接 Claude/Qwen/DeepSeek/GLM 等）。
+# 安装后在 .env 配置 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL 即启用 LLM 质检。
+openai>=1.30.0
