@@ -148,6 +148,64 @@ class TestLabels(unittest.TestCase):
         self.assertTrue(category_matches("任意", set()))  # 无法归一化时不计入
 
 
+class TestDedup(unittest.TestCase):
+    def test_cluster_near_duplicates(self):
+        from qc_agent.dedup import cluster_texts, group_by_cluster
+
+        texts = [
+            "我是投顾客服，联合上海证券创建官方福利群，关注官方接待员服务号",
+            "我是投顾客服，联合上海证券创建官方福利群，关注官方接待员的服务号",  # 近重复
+            "宽带提速不加价免费升级到500兆",
+        ]
+        clusters = cluster_texts(texts, threshold=0.8)
+        groups = group_by_cluster(clusters)
+        self.assertEqual(clusters[0], clusters[1])  # 前两条同簇
+        self.assertNotEqual(clusters[0], clusters[2])
+        self.assertEqual(len(groups), 2)
+
+
+class TestCache(unittest.TestCase):
+    def test_set_get_persist(self):
+        import tempfile, shutil
+        from qc_agent.cache import ResultCache
+
+        tmp = Path(tempfile.mkdtemp())
+        path = tmp / "c.jsonl"
+        c = ResultCache(path, model="m1", mode="fast")
+        self.assertIsNone(c.get("hello"))
+        c.set("hello", {"x": 1})
+        c.flush()
+        c2 = ResultCache(path, model="m1", mode="fast")
+        self.assertEqual(c2.get("hello"), {"x": 1})
+        # 换模型命名空间应失效。
+        c3 = ResultCache(path, model="m2", mode="fast")
+        self.assertIsNone(c3.get("hello"))
+        shutil.rmtree(tmp)
+
+
+class TestConflictClassify(unittest.TestCase):
+    def test_classify(self):
+        from qc_agent.reflect import classify_conflict
+        from qc_agent.schema import InspectionResult, RiskLevel
+
+        # 人工有标签但模型判正常 -> 漏判
+        normal = InspectionResult(is_violation=False, risk_level=RiskLevel.COMPLIANT, scene_category="正常")
+        c1 = classify_conflict("引导投资", normal)
+        self.assertIsNotNone(c1)
+        self.assertIn("漏判", c1["conflict_type"])
+        # 类目不一致
+        wrong_cat = InspectionResult(
+            is_violation=True, is_fraud=True, risk_level=RiskLevel.HIGH, scene_category="引流第三方平台"
+        )
+        c2 = classify_conflict("引导投资", wrong_cat)
+        self.assertIn("类目不一致", c2["conflict_type"])
+        # 一致 -> 无冲突
+        ok = InspectionResult(
+            is_violation=True, is_fraud=True, risk_level=RiskLevel.HIGH, scene_category="证券投资类"
+        )
+        self.assertIsNone(classify_conflict("引导投资", ok))
+
+
 class TestReflectEvolution(unittest.TestCase):
     def test_evolution_adds_examples(self):
         import json, tempfile, shutil

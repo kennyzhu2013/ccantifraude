@@ -12,8 +12,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from .agent import QcAgent
 from .case_store import CaseStore
+from .labels import expected_is_fraud, normalize_label
 from .retrieval import char_ngrams
 from .schema import InspectionResult
 
@@ -30,6 +33,26 @@ class EvolutionProposal:
 def expected_violation_from_comment(comment: str) -> bool:
     """CSV 的 comment 为人工复核说明：非空通常表示存在违规/涉诈线索。"""
     return bool((comment or "").strip())
+
+
+def classify_conflict(comment: str, res: InspectionResult) -> Optional[Dict[str, Any]]:
+    """判定预测与人工标签是否冲突，并归类冲突类型（供标签治理）。"""
+    expected_v = bool((comment or "").strip())
+    acceptable = normalize_label(comment)
+    types = []
+    if expected_v and not res.is_violation:
+        types.append("漏判：人工有标签但模型判正常")
+    if res.is_violation and acceptable and res.scene_category not in acceptable:
+        types.append("类目不一致")
+    ef = expected_is_fraud(comment)
+    if ef is True and not res.is_fraud:
+        types.append("涉诈漏标")
+    if not types:
+        return None
+    return {
+        "conflict_type": "；".join(types),
+        "acceptable_categories": "|".join(sorted(acceptable)),
+    }
 
 
 def _guess_category(kb, comment: str, content: str) -> str:
@@ -151,6 +174,60 @@ class ReflectAgent:
 
         self.kb.save_rules(rules)
         return True
+
+    # ---------- 冲突扫描（标签治理用，默认不改 rules） ----------
+    def scan_conflicts(
+        self,
+        cases: Optional[CaseStore] = None,
+        use_tools: bool = False,
+        workers: int = 6,
+        limit: Optional[int] = None,
+        sample: Optional[int] = None,
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        store = cases or self.agent.cases
+        if sample and sample < len(store.cases):
+            step = max(1, len(store.cases) // sample)
+            items = store.cases[::step][:sample]
+        else:
+            items = store.cases[:limit] if limit else store.cases
+
+        def run_one(case):
+            res = self.agent.inspect(case.content, data_id=case.data_id, use_tools=use_tools)
+            return case, res
+
+        conflicts: List[Dict[str, Any]] = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run_one, c) for c in items]
+            for fut in as_completed(futures):
+                case, res = fut.result()
+                done += 1
+                if verbose and done % 20 == 0:
+                    print(f"  扫描 {done}/{len(items)} ...", flush=True)
+                if done % 50 == 0:
+                    self.agent.flush_cache()  # 周期落盘，长任务中断不丢进度
+                info = classify_conflict(case.comment, res)
+                if info is None:
+                    continue
+                conflicts.append(
+                    {
+                        "data_id": case.data_id,
+                        "human_comment": case.comment,
+                        "conflict_type": info["conflict_type"],
+                        "model_label": res.label,
+                        "model_category": res.scene_category,
+                        "model_subtype": res.scene_subtype,
+                        "model_is_fraud": res.is_fraud,
+                        "model_risk": res.risk_level.value,
+                        "acceptable_categories": info["acceptable_categories"],
+                        "model_explanation": res.explanation,
+                        "content_snippet": case.short(300),
+                        "suggested_action": "人工复核：确认应以规范判定还是修正人工标签",
+                    }
+                )
+        self.agent.flush_cache()
+        return {"total": len(items), "conflicts": conflicts}
 
     # ---------- 批量自治演进 ----------
     def evolve_from_cases(
