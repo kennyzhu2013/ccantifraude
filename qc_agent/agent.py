@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -78,8 +79,10 @@ class QcAgent:
         self.verbose = verbose
         self.cache: Optional[ResultCache] = None
         if self.config.cache_path:
+            # 知识指纹纳入缓存命名空间：rules/规则/判定表变更后旧缓存自动失效，避免陈旧结论。
+            kb_fp = hashlib.sha1(self.kb.rules_brief().encode("utf-8")).hexdigest()[:10]
             self.cache = ResultCache(
-                Path(self.config.cache_path), self.config.llm_model, self.mode
+                Path(self.config.cache_path), self.config.llm_model, f"{self.mode}:{kb_fp}"
             )
 
     @property

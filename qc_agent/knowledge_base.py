@@ -143,6 +143,15 @@ class KnowledgeBase:
         lines.append("【涉诈场景（均为高风险，需标注为诈骗）】")
         for sc in self.rules.get("fraud_scenarios", []):
             lines.append(f"- {sc.get('category')}：{sc.get('judgment_method', '')}")
+        table = self.rules.get("business_decision_table", [])
+        if table:
+            lines.append("【业务口径判定表（最高优先级，命中即按此输出 category/subtype/risk_level）】")
+            for row in table:
+                sub = row.get("subtype") or "-"
+                lines.append(
+                    f"- {row.get('场景')} => {row.get('判定')}｜category={row.get('category')}"
+                    f"｜subtype={sub}｜risk_level={row.get('risk_level')}"
+                )
         disambig = self.rules.get("disambiguation", [])
         if disambig:
             lines.append("【易混场景子类目判别（重要，先按此消歧再定类目）】")
