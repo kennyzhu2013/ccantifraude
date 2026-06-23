@@ -20,9 +20,22 @@ from .config import Config, DEFAULT_CONFIG
 from .heuristic import HeuristicInspector
 from .knowledge_base import KnowledgeBase
 from .llm import LLMClient
-from .prompts import build_system_prompt
+from .prompts import (
+    build_fast_user_message,
+    build_system_prompt,
+    build_system_prompt_fast,
+)
 from .schema import InspectionResult, RiskLevel
 from .tools import ToolRegistry
+
+
+def _truncate(content: str, max_chars: int) -> str:
+    """超长转写保留头尾，控制 token；中间以省略标记替代。"""
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+    head = int(max_chars * 0.6)
+    tail = max_chars - head
+    return content[:head] + "\n…（中间省略）…\n" + content[-tail:]
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -67,11 +80,26 @@ class QcAgent:
         return "llm" if self.llm.available else "heuristic"
 
     # ---------- 对外主入口 ----------
-    def inspect(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
+    def inspect(
+        self,
+        content: str,
+        data_id: Optional[str] = None,
+        use_tools: Optional[bool] = None,
+    ) -> InspectionResult:
         if not self.llm.available:
             return self.heuristic.inspect(content, data_id=data_id)
+        tool_mode = self.config.use_tools if use_tools is None else use_tools
         try:
-            return self._inspect_with_llm(content, data_id=data_id)
+            if tool_mode:
+                return self._inspect_with_llm(content, data_id=data_id)
+            res = self._inspect_fast(content, data_id=data_id)
+            # 两阶段：快速模式低置信度时升级到完整工具回路复核。
+            threshold = self.config.escalate_below_confidence
+            if threshold > 0 and 0 < res.confidence < threshold:
+                if self.verbose:
+                    print(f"[escalate] 置信度 {res.confidence:.2f} < {threshold}，升级工具模式复核")
+                return self._inspect_with_llm(content, data_id=data_id)
+            return res
         except Exception as exc:  # pragma: no cover - LLM 调用失败时兜底
             if self.verbose:
                 print(f"[warn] LLM 质检失败，回退启发式：{exc}")
@@ -79,16 +107,37 @@ class QcAgent:
             res.analysis_thought = (res.analysis_thought + f"\n[LLM失败回退] {exc}").strip()
             return res
 
+    # ---------- 快速模式：检索增强单轮 ----------
+    def _inspect_fast(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
+        clipped = _truncate(content, self.config.max_content_chars)
+        # 排除当前样本自身，避免评估时把『标准答案』当相似判例泄漏给模型。
+        similar_block = self.tools.dispatch(
+            "retrieve_similar_cases", {"text": clipped, "exclude_id": data_id}
+        )
+        spec_block = self.tools.dispatch(
+            "search_spec", {"query": clipped[:300], "top_k": 3}
+        )
+        messages = [
+            {"role": "system", "content": build_system_prompt_fast(self.kb)},
+            {
+                "role": "user",
+                "content": build_fast_user_message(clipped, similar_block, spec_block),
+            },
+        ]
+        msg = self.llm.chat(messages, tools=None)
+        return self._finalize(msg["content"], content, data_id, source="llm-fast")
+
     # ---------- LLM agent loop ----------
     def _inspect_with_llm(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
         system_prompt = build_system_prompt(self.kb)
+        clipped = _truncate(content, self.config.max_content_chars)
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": (
                     "请对以下通话转写文本进行反诈质检，按系统要求先调查再输出 JSON 结论。\n\n"
-                    f"【通话转写文本】\n{content}"
+                    f"【通话转写文本】\n{clipped}"
                 ),
             },
         ]
@@ -141,6 +190,12 @@ class QcAgent:
             msg = self.llm.chat(messages, tools=None)
             final_text = msg["content"]
 
+        return self._finalize(final_text, content, data_id, source="llm")
+
+    # ---------- 结果归一化 ----------
+    def _finalize(
+        self, final_text: str, content: str, data_id: Optional[str], source: str
+    ) -> InspectionResult:
         payload = _extract_json(final_text)
         if payload is None:
             # 模型未给出可解析 JSON，回退启发式并附上模型原文。
@@ -151,8 +206,9 @@ class QcAgent:
             )
             return res
 
-        payload.setdefault("source", "llm")
+        payload.setdefault("source", source)
         res = InspectionResult.from_dict(payload)
+        res.source = source
         res.data_id = data_id
         # 一致性约束：涉诈一律高风险；任何非合规等级即视为违规。
         if res.is_fraud:

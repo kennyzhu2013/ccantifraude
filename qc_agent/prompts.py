@@ -46,3 +46,24 @@ def build_system_prompt(kb: KnowledgeBase) -> str:
         _OUTPUT,
     ]
     return "\n\n".join(sections)
+
+
+def build_system_prompt_fast(kb: KnowledgeBase) -> str:
+    """快速模式（检索增强单轮）：不暴露工具，相关知识在 user 消息中直接给出。"""
+    sections = [
+        _ROLE,
+        _PRINCIPLE,
+        "【知识库规则总览】\n" + kb.rules_brief(),
+        _OUTPUT,
+    ]
+    return "\n\n".join(sections)
+
+
+def build_fast_user_message(content, similar_block: str, spec_block: str) -> str:
+    parts = ["请对以下通话转写文本进行反诈质检，直接输出 JSON 结论（不要调用工具、不要多余文字）。"]
+    if spec_block:
+        parts.append("【可参考的规范小节】\n" + spec_block)
+    if similar_block:
+        parts.append("【最相似的人工历史判例（few-shot，对齐人工口径，仅供参考勿照抄）】\n" + similar_block)
+    parts.append("【待质检通话转写文本】\n" + content)
+    return "\n\n".join(parts)

@@ -1,0 +1,102 @@
+"""人工标签归一化。
+
+真实人工 comment 较粗、口径不一、含错别字（如『引导投资』『引导投资理财』
+『手机租赁套路贷看诈骗』），需映射到知识库的规范类目，才能做类目级评估与对齐。
+"""
+from __future__ import annotations
+
+from typing import Optional, Set
+
+# 规范类目（与 rules.json 对齐）。
+VIOLATION_CATEGORIES = {
+    "引流第三方平台",
+    "贷款相关",
+    "法律服务",
+    "企业营销与招商服务",
+    "商品推销",
+    "商业地产",
+    "违规催收",
+    "其他",
+}
+FRAUD_CATEGORIES = {
+    "机票退、改签诈骗",
+    "手机租赁套路贷诈骗",
+    "证券投资类",
+    "网贷平台退息退费",
+    "个体工商户年报补录收费",
+}
+
+# 子串关键词 -> 规范类目（按优先级匹配，可命中多个）。
+_KEYWORD_TO_CATEGORY = [
+    ("投资理财", "证券投资类"),
+    ("投资", "证券投资类"),
+    ("投顾", "证券投资类"),
+    ("炒股", "证券投资类"),
+    ("股票", "证券投资类"),
+    ("证券", "证券投资类"),
+    ("基金", "证券投资类"),
+    ("手机租赁", "手机租赁套路贷诈骗"),
+    ("租赁套路", "手机租赁套路贷诈骗"),
+    ("套路贷", "手机租赁套路贷诈骗"),
+    ("退息", "网贷平台退息退费"),
+    ("退费", "网贷平台退息退费"),
+    ("机票", "机票退、改签诈骗"),
+    ("改签", "机票退、改签诈骗"),
+    ("退票", "机票退、改签诈骗"),
+    ("年报", "个体工商户年报补录收费"),
+    ("税务", "个体工商户年报补录收费"),
+    ("补录", "个体工商户年报补录收费"),
+    ("引流", "引流第三方平台"),
+    ("加微信", "引流第三方平台"),
+    ("服务号", "引流第三方平台"),
+    ("催收", "违规催收"),
+    ("通讯录", "违规催收"),
+    ("贷款", "贷款相关"),
+    ("网贷", "贷款相关"),
+    ("保健品", "商品推销"),
+    ("pos", "商品推销"),
+    ("法律", "法律服务"),
+    ("维权", "法律服务"),
+    ("获客", "企业营销与招商服务"),
+    ("招商", "企业营销与招商服务"),
+    ("加盟", "企业营销与招商服务"),
+    ("法拍", "商业地产"),
+    ("代运营", "商业地产"),
+    ("装修", "商业地产"),
+]
+
+# 明确表示涉诈的词。
+_FRAUD_HINTS = ("涉诈", "诈骗", "套路贷", "退息", "退费")
+
+
+def normalize_label(comment: str) -> Set[str]:
+    """把人工 comment 映射为一组可接受的规范类目（用于类目级评估）。"""
+    text = (comment or "").strip().lower()
+    if not text:
+        return set()
+    cats: Set[str] = set()
+    for kw, cat in _KEYWORD_TO_CATEGORY:
+        if kw.lower() in text:
+            cats.add(cat)
+    # 含『退息退费』优先归网贷退息退费，避免被『贷款相关』稀释（仍保留作可接受集）。
+    return cats
+
+
+def expected_is_fraud(comment: str) -> Optional[bool]:
+    """人工标签是否指向涉诈。无法判断时返回 None（不参与涉诈准确率统计）。"""
+    text = (comment or "").strip()
+    if not text:
+        return None
+    if any(h in text for h in _FRAUD_HINTS):
+        return True
+    cats = normalize_label(text)
+    if cats & FRAUD_CATEGORIES:
+        return True
+    # 纯违规类（如『引流第三方平台』）人工未必标涉诈，返回 None 表示不强约束。
+    return None
+
+
+def category_matches(predicted: str, acceptable: Set[str]) -> bool:
+    if not acceptable:
+        return True  # 无法归一化的标签不计入类目准确率（视为通过）。
+    return predicted in acceptable

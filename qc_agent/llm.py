@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 from .config import Config
@@ -50,7 +51,7 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = self._create_with_retry(kwargs)
         msg = resp.choices[0].message
         tool_calls = []
         for tc in (getattr(msg, "tool_calls", None) or []):
@@ -66,3 +67,17 @@ class LLMClient:
             "tool_calls": tool_calls,
             "raw": msg,
         }
+
+    def _create_with_retry(self, kwargs: Dict[str, Any]):
+        """对限流/网络/5xx 等瞬时错误做指数退避重试。"""
+        attempts = max(1, self.config.llm_max_retries)
+        last_exc: Optional[Exception] = None
+        for i in range(attempts):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except Exception as exc:  # noqa: BLE001 - 统一退避，最后一次抛出
+                last_exc = exc
+                if i == attempts - 1:
+                    break
+                time.sleep(self.config.llm_retry_backoff * (2 ** i))
+        raise last_exc  # type: ignore[misc]

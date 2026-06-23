@@ -47,6 +47,32 @@ class Config:
     max_tool_turns: int = field(
         default_factory=lambda: int(os.getenv("QC_MAX_TOOL_TURNS", "6"))
     )
+    # 快速模式：检索增强单轮（预先注入相似判例+规范小节，免去多轮工具往返）。
+    # 显著降低延迟与 token 成本，适合大批量质检；关闭则走完整 agentic tool loop。
+    use_tools: bool = field(
+        default_factory=lambda: os.getenv("QC_USE_TOOLS", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # 超长转写截断（保留头尾，控制 token）。0 表示不截断。
+    max_content_chars: int = field(
+        default_factory=lambda: int(os.getenv("QC_MAX_CONTENT_CHARS", "6000"))
+    )
+    # LLM 调用失败重试次数与退避基数（秒）。
+    llm_max_retries: int = field(
+        default_factory=lambda: int(os.getenv("QC_LLM_MAX_RETRIES", "3"))
+    )
+    llm_retry_backoff: float = field(
+        default_factory=lambda: float(os.getenv("QC_LLM_RETRY_BACKOFF", "2.0"))
+    )
+    # 批量评估并发数。
+    batch_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("QC_BATCH_CONCURRENCY", "4"))
+    )
+    # 两阶段策略：快速模式置信度低于该值时自动升级到完整 agentic tool loop 复核。
+    # 0 表示关闭（默认）。体现 learn-claude-code 的『错误恢复/换条路』。
+    escalate_below_confidence: float = field(
+        default_factory=lambda: float(os.getenv("QC_ESCALATE_BELOW_CONFIDENCE", "0.0"))
+    )
 
     # ---- 知识与数据路径 ----
     spec_path: Path = field(default_factory=lambda: PROJECT_ROOT / "knowledge" / "spec.md")
