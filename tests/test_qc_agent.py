@@ -142,10 +142,27 @@ class TestLabels(unittest.TestCase):
         self.assertIn("证券投资类", normalize_label("引导投资理财"))
         self.assertIn("手机租赁套路贷诈骗", normalize_label("手机租赁套路贷看诈骗"))
         self.assertIn("网贷平台退息退费", normalize_label("网贷平台退息退费，涉诈"))
+        self.assertIn("企业营销与招商服务", normalize_label("会展招商会收费"))
         self.assertTrue(expected_is_fraud("引导投资"))
         self.assertIsNone(expected_is_fraud(""))
         self.assertTrue(category_matches("证券投资类", {"证券投资类"}))
         self.assertTrue(category_matches("任意", set()))  # 无法归一化时不计入
+
+    def test_compliant_label(self):
+        from qc_agent.labels import is_compliant_label
+
+        self.assertTrue(is_compliant_label("合规招商加盟"))
+        self.assertTrue(is_compliant_label("品牌招商加盟"))
+        self.assertFalse(is_compliant_label("引导投资理财"))
+        self.assertFalse(is_compliant_label(""))
+
+    def test_decision_table_in_brief(self):
+        cfg = Config()
+        kb = KnowledgeBase(cfg.spec_path, cfg.rules_path)
+        brief = kb.rules_brief()
+        self.assertIn("业务口径判定表", brief)
+        self.assertIn("AI推广获客服务", brief)
+        self.assertIn("证券投资引流", brief)
 
 
 class TestDedup(unittest.TestCase):

@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .agent import QcAgent
 from .case_store import CaseStore
-from .labels import expected_is_fraud, normalize_label
+from .labels import expected_is_fraud, is_compliant_label, normalize_label
 from .retrieval import char_ngrams
 from .schema import InspectionResult
 
@@ -37,11 +37,13 @@ def expected_violation_from_comment(comment: str) -> bool:
 
 def classify_conflict(comment: str, res: InspectionResult) -> Optional[Dict[str, Any]]:
     """判定预测与人工标签是否冲突，并归类冲突类型（供标签治理）。"""
-    expected_v = bool((comment or "").strip())
+    expected_v = bool((comment or "").strip()) and not is_compliant_label(comment)
     acceptable = normalize_label(comment)
     types = []
     if expected_v and not res.is_violation:
         types.append("漏判：人工有标签但模型判正常")
+    if is_compliant_label(comment) and res.is_violation:
+        types.append("误判：人工标注合规但模型判违规")
     if res.is_violation and acceptable and res.scene_category not in acceptable:
         types.append("类目不一致")
     ef = expected_is_fraud(comment)

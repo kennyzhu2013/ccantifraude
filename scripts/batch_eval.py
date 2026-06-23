@@ -23,7 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from qc_agent import Config, QcAgent  # noqa: E402
 from qc_agent.case_store import CaseStore  # noqa: E402
 from qc_agent.dedup import cluster_texts, group_by_cluster  # noqa: E402
-from qc_agent.labels import category_matches, expected_is_fraud, normalize_label  # noqa: E402
+from qc_agent.labels import (  # noqa: E402
+    category_matches,
+    expected_is_fraud,
+    is_compliant_label,
+    normalize_label,
+)
 from qc_agent.schema import InspectionResult  # noqa: E402
 
 
@@ -146,7 +151,8 @@ def _report(rows, llm_calls, elapsed):
     cat_total = cat_correct = 0
     fraud_total = fraud_correct = 0
     for r in rows:
-        expected_v = bool(str(r["human_comment"]).strip())
+        comment = str(r["human_comment"])
+        expected_v = bool(comment.strip()) and not is_compliant_label(comment)
         pred_v = bool(r["is_violation"])
         if pred_v and expected_v:
             tp += 1
