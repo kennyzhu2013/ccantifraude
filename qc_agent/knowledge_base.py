@@ -143,6 +143,11 @@ class KnowledgeBase:
         lines.append("【涉诈场景（均为高风险，需标注为诈骗）】")
         for sc in self.rules.get("fraud_scenarios", []):
             lines.append(f"- {sc.get('category')}：{sc.get('judgment_method', '')}")
+        disambig = self.rules.get("disambiguation", [])
+        if disambig:
+            lines.append("【易混场景子类目判别（重要，先按此消歧再定类目）】")
+            for d in disambig:
+                lines.append(f"- {d}")
         evolved = self.rules.get("evolved_examples", [])
         if evolved:
             lines.append("【已自动演进沉淀的边缘案例（错题本）】")
