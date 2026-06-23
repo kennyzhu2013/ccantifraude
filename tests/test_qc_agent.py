@@ -7,6 +7,8 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+SAMPLE_CSV = ROOT / "data" / "sample_cases.csv"
+
 from qc_agent import Config, QcAgent  # noqa: E402
 from qc_agent.case_store import CaseStore  # noqa: E402
 from qc_agent.knowledge_base import KnowledgeBase  # noqa: E402
@@ -52,7 +54,7 @@ class TestKnowledgeBase(unittest.TestCase):
 
 class TestCaseStore(unittest.TestCase):
     def setUp(self):
-        self.store = CaseStore(Config().cases_path)
+        self.store = CaseStore(SAMPLE_CSV)
 
     def test_loaded(self):
         self.assertGreater(len(self.store), 5)
@@ -63,9 +65,17 @@ class TestCaseStore(unittest.TestCase):
         self.assertIn("航", hits[0].content)
 
 
+def _offline_config() -> Config:
+    """强制离线（启发式）：忽略 .env 中可能存在的真实 Key，固定用样例语料，保证单测可重复、不联网。"""
+    cfg = Config()
+    cfg.llm_api_key = ""
+    cfg.cases_path = SAMPLE_CSV
+    return cfg
+
+
 class TestHeuristicInspection(unittest.TestCase):
     def setUp(self):
-        cfg = Config()
+        cfg = _offline_config()
         self.agent = QcAgent(config=cfg, cases=CaseStore(cfg.cases_path))
 
     def test_mode_is_heuristic_without_key(self):
@@ -124,15 +134,29 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(res.label, "违规-低风险-贷款相关/提前收取费用")
 
 
+class TestLabels(unittest.TestCase):
+    def test_normalize(self):
+        from qc_agent.labels import normalize_label, expected_is_fraud, category_matches
+
+        self.assertIn("证券投资类", normalize_label("引导投资"))
+        self.assertIn("证券投资类", normalize_label("引导投资理财"))
+        self.assertIn("手机租赁套路贷诈骗", normalize_label("手机租赁套路贷看诈骗"))
+        self.assertIn("网贷平台退息退费", normalize_label("网贷平台退息退费，涉诈"))
+        self.assertTrue(expected_is_fraud("引导投资"))
+        self.assertIsNone(expected_is_fraud(""))
+        self.assertTrue(category_matches("证券投资类", {"证券投资类"}))
+        self.assertTrue(category_matches("任意", set()))  # 无法归一化时不计入
+
+
 class TestReflectEvolution(unittest.TestCase):
     def test_evolution_adds_examples(self):
         import json, tempfile, shutil
-        cfg = Config()
+        cfg = _offline_config()
         tmp = Path(tempfile.mkdtemp())
         rules_copy = tmp / "rules.json"
         shutil.copy(cfg.rules_path, rules_copy)
         kb = KnowledgeBase(cfg.spec_path, rules_copy)
-        store = CaseStore(cfg.cases_path)
+        store = CaseStore(SAMPLE_CSV)
         agent = QcAgent(config=cfg, kb=kb, cases=store)
         reflector = ReflectAgent(agent)
         before = len(kb.rules.get("evolved_examples", []))

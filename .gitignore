@@ -6,3 +6,6 @@ venv/
 results.csv
 *.egg-info/
 .pytest_cache/
+
+# 真实人工标注语料（含业务数据，不入库）
+data/real_cases.csv
