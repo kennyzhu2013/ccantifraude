@@ -73,6 +73,8 @@ class Config:
     escalate_below_confidence: float = field(
         default_factory=lambda: float(os.getenv("QC_ESCALATE_BELOW_CONFIDENCE", "0.0"))
     )
+    # 结果缓存路径（按内容哈希）。空字符串=禁用。降本：避免重复/重跑 LLM 调用。
+    cache_path: str = field(default_factory=lambda: os.getenv("QC_CACHE_PATH", ""))
 
     # ---- 知识与数据路径 ----
     spec_path: Path = field(default_factory=lambda: PROJECT_ROOT / "knowledge" / "spec.md")

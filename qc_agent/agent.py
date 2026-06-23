@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .cache import ResultCache
 from .case_store import CaseStore
 from .config import Config, DEFAULT_CONFIG
 from .heuristic import HeuristicInspector
@@ -74,10 +76,19 @@ class QcAgent:
         )
         self.heuristic = HeuristicInspector(self.kb, self.cases, top_k=self.config.retrieve_top_k)
         self.verbose = verbose
+        self.cache: Optional[ResultCache] = None
+        if self.config.cache_path:
+            self.cache = ResultCache(
+                Path(self.config.cache_path), self.config.llm_model, self.mode
+            )
 
     @property
     def mode(self) -> str:
         return "llm" if self.llm.available else "heuristic"
+
+    def flush_cache(self) -> None:
+        if self.cache is not None:
+            self.cache.flush()
 
     # ---------- 对外主入口 ----------
     def inspect(
@@ -89,23 +100,36 @@ class QcAgent:
         if not self.llm.available:
             return self.heuristic.inspect(content, data_id=data_id)
         tool_mode = self.config.use_tools if use_tools is None else use_tools
+
+        cache_ns = "tools" if tool_mode else "fast"
+        if self.cache is not None:
+            cached = self.cache.get(cache_ns + "\n" + content)
+            if cached is not None:
+                res = InspectionResult.from_dict(cached)
+                res.data_id = data_id
+                return res
+
         try:
             if tool_mode:
-                return self._inspect_with_llm(content, data_id=data_id)
-            res = self._inspect_fast(content, data_id=data_id)
-            # 两阶段：快速模式低置信度时升级到完整工具回路复核。
-            threshold = self.config.escalate_below_confidence
-            if threshold > 0 and 0 < res.confidence < threshold:
-                if self.verbose:
-                    print(f"[escalate] 置信度 {res.confidence:.2f} < {threshold}，升级工具模式复核")
-                return self._inspect_with_llm(content, data_id=data_id)
-            return res
+                res = self._inspect_with_llm(content, data_id=data_id)
+            else:
+                res = self._inspect_fast(content, data_id=data_id)
+                # 两阶段：快速模式低置信度时升级到完整工具回路复核。
+                threshold = self.config.escalate_below_confidence
+                if threshold > 0 and 0 < res.confidence < threshold:
+                    if self.verbose:
+                        print(f"[escalate] 置信度 {res.confidence:.2f} < {threshold}，升级工具模式复核")
+                    res = self._inspect_with_llm(content, data_id=data_id)
         except Exception as exc:  # pragma: no cover - LLM 调用失败时兜底
             if self.verbose:
                 print(f"[warn] LLM 质检失败，回退启发式：{exc}")
             res = self.heuristic.inspect(content, data_id=data_id)
             res.analysis_thought = (res.analysis_thought + f"\n[LLM失败回退] {exc}").strip()
             return res
+
+        if self.cache is not None and res.source.startswith("llm"):
+            self.cache.set(cache_ns + "\n" + content, res.to_dict())
+        return res
 
     # ---------- 快速模式：检索增强单轮 ----------
     def _inspect_fast(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
