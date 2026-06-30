@@ -44,6 +44,10 @@ class Config:
     llm_max_tokens: int = field(
         default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "2048"))
     )
+    # 单次请求超时（秒）。防止个别请求挂死阻塞 worker（SDK 默认超时极长）。
+    llm_timeout: float = field(
+        default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "90"))
+    )
     max_tool_turns: int = field(
         default_factory=lambda: int(os.getenv("QC_MAX_TOOL_TURNS", "6"))
     )

@@ -21,7 +21,12 @@ class LLMClient:
             try:
                 from openai import OpenAI  # type: ignore
 
-                self._client = OpenAI(api_key=config.llm_api_key, base_url=config.llm_base_url)
+                self._client = OpenAI(
+                    api_key=config.llm_api_key,
+                    base_url=config.llm_base_url,
+                    timeout=config.llm_timeout,
+                    max_retries=0,  # 重试由本类统一控制（含退避）
+                )
             except Exception as exc:  # pragma: no cover - 依赖缺失路径
                 self._import_error = str(exc)
 
@@ -74,7 +79,9 @@ class LLMClient:
         last_exc: Optional[Exception] = None
         for i in range(attempts):
             try:
-                return self._client.chat.completions.create(**kwargs)
+                return self._client.chat.completions.create(
+                    timeout=self.config.llm_timeout, **kwargs
+                )
             except Exception as exc:  # noqa: BLE001 - 统一退避，最后一次抛出
                 last_exc = exc
                 if i == attempts - 1:
