@@ -57,6 +57,32 @@ def classify_conflict(comment: str, res: InspectionResult) -> Optional[Dict[str,
     }
 
 
+# 招商加盟/会展无收费类合规信号（按业务口径，这些被人工误标为违规时应回标为合规）。
+_COMPLIANT_BIZ_KW = ("招商", "加盟", "零食", "棋牌", "阿里", "国际站", "参展", "展位", "会展", "门店")
+
+# 桶名常量。
+BUCKET_RELABEL_COMPLIANT = "A_建议回标为合规-招商加盟或会展无收费"
+BUCKET_REAL_VIOLATION = "B_真违规-模型已判违规涉诈需核对类目或涉诈程度"
+BUCKET_NEED_HUMAN = "C_待人工复核-模型判正常但非典型招商加盟"
+
+
+def bucket_conflict(comment: str, res: InspectionResult, content: str = "") -> str:
+    """把冲突样本分桶，便于下发回标。
+
+    - A：模型判合规/正常，且话术/判定指向品牌招商加盟、阿里国际站、会展无提前收费
+         —— 按业务口径属人工误标，建议回标为合规。
+    - B：模型已判违规/涉诈 —— 模型认同是违规，差异多在类目/涉诈程度，属真违规，核对类目即可。
+    - C：模型判合规/正常但话术不像典型招商加盟 —— 交人工再确认，避免漏放。
+    """
+    text = f"{content or ''} {res.explanation or ''} {res.scene_category} {res.scene_subtype}"
+    biz = any(k in text for k in _COMPLIANT_BIZ_KW)
+    if res.is_violation:
+        return BUCKET_REAL_VIOLATION
+    if biz:
+        return BUCKET_RELABEL_COMPLIANT
+    return BUCKET_NEED_HUMAN
+
+
 def _guess_category(kb, comment: str, content: str) -> str:
     """根据人工标签 + 正文，猜测最匹配的场景类目。"""
     text = f"{comment} {comment} {content}"
@@ -216,6 +242,7 @@ class ReflectAgent:
                     {
                         "data_id": case.data_id,
                         "human_comment": case.comment,
+                        "bucket": bucket_conflict(case.comment, res, case.content),
                         "conflict_type": info["conflict_type"],
                         "model_label": res.label,
                         "model_category": res.scene_category,

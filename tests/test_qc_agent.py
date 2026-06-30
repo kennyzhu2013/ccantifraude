@@ -222,6 +222,27 @@ class TestConflictClassify(unittest.TestCase):
         )
         self.assertIsNone(classify_conflict("引导投资", ok))
 
+    def test_bucket(self):
+        from qc_agent.reflect import (
+            bucket_conflict,
+            BUCKET_RELABEL_COMPLIANT,
+            BUCKET_REAL_VIOLATION,
+            BUCKET_NEED_HUMAN,
+        )
+        from qc_agent.schema import InspectionResult, RiskLevel
+
+        # 模型判正常 + 招商加盟话术 -> A 回标合规
+        a = InspectionResult(is_violation=False, scene_category="正常",
+                             explanation="休闲零食品牌招商加盟，合规")
+        self.assertEqual(bucket_conflict("引导投资理财", a, "零食店加盟招商"), BUCKET_RELABEL_COMPLIANT)
+        # 模型判违规/涉诈 -> B 真违规
+        b = InspectionResult(is_violation=True, is_fraud=True, risk_level=RiskLevel.HIGH,
+                             scene_category="引流第三方平台")
+        self.assertEqual(bucket_conflict("手机租赁套路贷诈骗", b, "微钱包贷款加微信"), BUCKET_REAL_VIOLATION)
+        # 模型判正常 + 非典型招商加盟 -> C 待人工
+        c = InspectionResult(is_violation=False, scene_category="正常", explanation="商业合作沟通")
+        self.assertEqual(bucket_conflict("引导投资", c, "你好在外面打个招呼"), BUCKET_NEED_HUMAN)
+
 
 class TestReflectEvolution(unittest.TestCase):
     def test_evolution_adds_examples(self):

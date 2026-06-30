@@ -25,6 +25,15 @@ from qc_agent.case_store import CaseStore  # noqa: E402
 from qc_agent.reflect import ReflectAgent  # noqa: E402
 
 
+def _write_csv(path: Path, rows: list) -> None:
+    if not rows:
+        return
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="重庆行业卡反诈语音质检 - 标签治理/自治演进")
     parser.add_argument("--csv", help="人工标注 CSV（默认用配置中的 cases 路径）")
@@ -68,16 +77,23 @@ def main() -> int:
 
     out_path = Path(args.out)
     if conflicts:
-        with out_path.open("w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(conflicts[0].keys()))
-            writer.writeheader()
-            writer.writerows(conflicts)
+        _write_csv(out_path, conflicts)
 
     print("=" * 56)
     print(f"扫描样本：{result['total']}  冲突样本：{len(conflicts)}  "
           f"（占比 {len(conflicts) / max(result['total'],1):.1%}）")
+
+    # 按桶分文件导出（招商加盟回标合规 / 真违规 / 待人工复核）。
+    bucket_counter = Counter(c["bucket"] for c in conflicts)
+    print("\n分桶分布（用于下发回标）：")
+    for b, n in sorted(bucket_counter.items()):
+        bucket_rows = [c for c in conflicts if c["bucket"] == b]
+        bucket_path = out_path.with_name(f"{out_path.stem}_{b}{out_path.suffix}")
+        _write_csv(bucket_path, bucket_rows)
+        print(f"  {n:4d}  {b}\n        -> {bucket_path}")
+
     type_counter = Counter(c["conflict_type"] for c in conflicts)
-    print("冲突类型分布：")
+    print("\n冲突类型分布：")
     for t, n in type_counter.most_common():
         print(f"  {n:4d}  {t}")
     label_counter = Counter(c["human_comment"] for c in conflicts)
@@ -85,7 +101,7 @@ def main() -> int:
     for t, n in label_counter.most_common(10):
         print(f"  {n:4d}  {t[:40]}")
     if conflicts:
-        print(f"\n冲突样本已导出：{out_path}（请人工复核：以规范判定为准还是修正人工标签）")
+        print(f"\n全部冲突已导出：{out_path}（A 桶建议直接回标为合规；B 桶核对类目/涉诈；C 桶人工再确认）")
 
     if args.apply:
         print("\n--apply：让反射 Agent 自动演进 rules.json ...")

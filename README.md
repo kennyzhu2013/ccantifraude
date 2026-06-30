@@ -228,8 +228,16 @@ python3 scripts/evolve.py --csv data/your_labeled.csv --apply
 python3 scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache --workers 8
 ```
 
-产出 `conflicts.csv`（每条含：人工标签、冲突类型、模型判定/说明/原文片段、建议动作），供人工裁决：
-**以规范判定为准、还是修正人工标签**。裁决后再决定是否更新 `rules.json`/规范。
+产出 `conflicts.csv`（每条含：人工标签、**分桶 bucket**、冲突类型、模型判定/说明/原文片段、建议动作），
+并自动按桶拆分为独立文件，便于直接下发回标：
+
+| 桶 | 含义 | 建议动作 |
+|---|---|---|
+| **A_建议回标为合规** | 模型判正常 + 话术指向品牌招商加盟 / 阿里国际站 / 会展无收费 | 按业务口径属人工误标，**直接回标为合规** |
+| **B_真违规** | 模型已判违规/涉诈（与人工差异多在类目/涉诈程度） | 核对类目/涉诈程度即可，属真违规 |
+| **C_待人工复核** | 模型判正常但话术不像典型招商加盟 | 人工再确认，避免漏放 |
+
+生成文件：`conflicts.csv`（全部）+ `conflicts_A_*.csv` / `conflicts_B_*.csv` / `conflicts_C_*.csv`（分桶）。
 确需让反射 Agent 自动把冲突沉淀为规则时，显式加 `--apply`（谨慎，避免学到噪声）。
 
 ### 业务口径判定表（已编码进 `rules.json` 的 `business_decision_table`，prompt 最高优先级）
