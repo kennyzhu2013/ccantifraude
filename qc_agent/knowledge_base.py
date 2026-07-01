@@ -148,10 +148,14 @@ class KnowledgeBase:
             lines.append("【业务口径判定表（最高优先级，命中即按此输出 category/subtype/risk_level）】")
             for row in table:
                 sub = row.get("subtype") or "-"
-                lines.append(
+                line = (
                     f"- {row.get('场景')} => {row.get('判定')}｜category={row.get('category')}"
                     f"｜subtype={sub}｜risk_level={row.get('risk_level')}"
                 )
+                note = row.get("备注")
+                if note:
+                    line += f"｜备注：{note}"
+                lines.append(line)
         disambig = self.rules.get("disambiguation", [])
         if disambig:
             lines.append("【易混场景子类目判别（重要，先按此消歧再定类目）】")

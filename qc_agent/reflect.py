@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .agent import QcAgent
 from .case_store import CaseStore
-from .labels import expected_is_fraud, is_compliant_label, normalize_label
+from .labels import FRAUD_CATEGORIES, expected_is_fraud, is_compliant_label, normalize_label
 from .retrieval import char_ngrams
 from .schema import InspectionResult
 
@@ -60,6 +60,14 @@ def classify_conflict(comment: str, res: InspectionResult) -> Optional[Dict[str,
 # 招商加盟/会展无收费类合规信号（按业务口径，这些被人工误标为违规时应回标为合规）。
 _COMPLIANT_BIZ_KW = ("招商", "加盟", "零食", "棋牌", "阿里", "国际站", "参展", "展位", "会展", "门店")
 
+# 领域红旗词护栏：即便出现『招商/加盟』等合规话术表面词，只要命中这些域内欺诈信号，
+# 也不能直接归为 A（回标合规），因为这些诈骗专门伪装成正规招商话术（如设备租赁平台
+# 招募『区域服务商』诈骗）。命中时至少转入 C 桶交人工复核，避免被话术表面词误导。
+_FRAUD_DOMAIN_OVERRIDE_KW = (
+    "设备租赁", "区域服务商", "锁定区域", "抽佣", "管道式收益", "宿租", "诉租",
+    "租赁服务商", "以租代购", "分期手机", "手机租赁", "青年优品", "芝麻租赁",
+)
+
 # 桶名常量。
 BUCKET_RELABEL_COMPLIANT = "A_建议回标为合规-招商加盟或会展无收费"
 BUCKET_REAL_VIOLATION = "B_真违规-模型已判违规涉诈需核对类目或涉诈程度"
@@ -78,6 +86,14 @@ def bucket_conflict(comment: str, res: InspectionResult, content: str = "") -> s
     biz = any(k in text for k in _COMPLIANT_BIZ_KW)
     if res.is_violation:
         return BUCKET_REAL_VIOLATION
+
+    # 护栏：人工标签本身指向涉诈类目，且原文命中域内欺诈红旗词（如设备租赁平台招募
+    # 区域服务商），即便同时出现『招商/加盟』等表面词，也不能直接判为回标合规——
+    # 这类诈骗专门伪装成正规招商，转入 C 桶交人工复核，避免被表面词误导漏放。
+    acceptable = normalize_label(comment)
+    red_flag = any(k in text for k in _FRAUD_DOMAIN_OVERRIDE_KW)
+    if biz and (acceptable & FRAUD_CATEGORIES) and red_flag:
+        return BUCKET_NEED_HUMAN
     if biz:
         return BUCKET_RELABEL_COMPLIANT
     return BUCKET_NEED_HUMAN

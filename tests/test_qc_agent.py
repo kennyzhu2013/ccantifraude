@@ -243,6 +243,24 @@ class TestConflictClassify(unittest.TestCase):
         c = InspectionResult(is_violation=False, scene_category="正常", explanation="商业合作沟通")
         self.assertEqual(bucket_conflict("引导投资", c, "你好在外面打个招呼"), BUCKET_NEED_HUMAN)
 
+    def test_bucket_domain_override_guardrail(self):
+        """设备租赁平台招募区域服务商：即便含招商/加盟表面词，也不应误入A桶（回标合规）。"""
+        from qc_agent.reflect import bucket_conflict, BUCKET_RELABEL_COMPLIANT, BUCKET_NEED_HUMAN
+        from qc_agent.schema import InspectionResult
+
+        content = "left:我们这边是天机宿租设备租赁平台，招募区域服务商，需要先出资锁定区域，长期抽佣管道式收益，这属于招商版块的合作模式。"
+        missed = InspectionResult(is_violation=False, scene_category="正常",
+                                  explanation="正常品牌招商加盟推广")
+        self.assertEqual(
+            bucket_conflict("手机租赁套路贷诈骗", missed, content), BUCKET_NEED_HUMAN
+        )
+        # 普通品牌招商加盟（无域内红旗词）应仍归 A。
+        plain = InspectionResult(is_violation=False, scene_category="正常",
+                                 explanation="休闲零食品牌招商加盟，合规")
+        self.assertEqual(
+            bucket_conflict("引导投资理财", plain, "零食店加盟招商"), BUCKET_RELABEL_COMPLIANT
+        )
+
 
 class TestReflectEvolution(unittest.TestCase):
     def test_evolution_adds_examples(self):
