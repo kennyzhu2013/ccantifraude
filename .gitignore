@@ -5,6 +5,7 @@ __pycache__/
 venv/
 results.csv
 conflicts*.csv
+random100_review.csv
 .cache/
 cache/
 *.egg-info/
