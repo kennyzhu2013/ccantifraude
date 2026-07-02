@@ -132,6 +132,17 @@ class TestHeuristicInspection(unittest.TestCase):
         res = self.agent.inspect(text)
         self.assertNotEqual(res.scene_category, "个体工商户年报补录收费")
 
+    def test_verification_code_forwarding_fraud_detected(self):
+        """要求转发/读出短信验证码，无论借口是什么，都应判定为验证码诈骗高风险。"""
+        text = (
+            "left:您好，这边是装修业务受理，需要您签字确认一下，麻烦您把刚才收到的那条短信"
+            "内容念给我一下，或者直接把那个短信转发到我这个手机号上，验证码是好多？"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_violation)
+        self.assertTrue(res.is_fraud)
+        self.assertEqual(res.scene_category, "验证码/短信转发诈骗")
+
     def test_tax_scam_canonical_case_still_detected(self):
         text = (
             "left:我是这边线上税务部中心点的，你这个营业执照还没有年报，"
