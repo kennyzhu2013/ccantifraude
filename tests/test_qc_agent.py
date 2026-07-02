@@ -143,6 +143,16 @@ class TestHeuristicInspection(unittest.TestCase):
         self.assertTrue(res.is_fraud)
         self.assertEqual(res.scene_category, "验证码/短信转发诈骗")
 
+    def test_collections_ex_spouse_and_balance_screenshot_detected(self):
+        """催收提及联系前妻/要求发送银行卡余额截图，超出正常催收范围，应判违规。"""
+        text = (
+            "left:你欠的钱不还，我们就联系你前妻了。你把余额截个图发给我，"
+            "我要确保你有没有钱，有钱的话我给你转平台里边。"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_violation)
+        self.assertEqual(res.scene_category, "违规催收")
+
     def test_tax_scam_canonical_case_still_detected(self):
         text = (
             "left:我是这边线上税务部中心点的，你这个营业执照还没有年报，"
