@@ -153,6 +153,17 @@ class TestHeuristicInspection(unittest.TestCase):
         self.assertTrue(res.is_violation)
         self.assertEqual(res.scene_category, "违规催收")
 
+    def test_collections_severe_threat_escalated_to_high_risk(self):
+        """催收威胁全网公开身份证号/冒充纪检机关等极端手段，应升级为高风险而非默认低风险。"""
+        text = (
+            "left:你的姓名身份证号等信息将全网公开，你会被列入失信黑名单，"
+            "还会移交纪检委和组织部处理。"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_violation)
+        self.assertEqual(res.scene_category, "违规催收")
+        self.assertEqual(res.risk_level, RiskLevel.HIGH)
+
     def test_tax_scam_canonical_case_still_detected(self):
         text = (
             "left:我是这边线上税务部中心点的，你这个营业执照还没有年报，"
