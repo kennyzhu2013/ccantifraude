@@ -113,6 +113,34 @@ class TestHeuristicInspection(unittest.TestCase):
         # 外呼人员主动添加个人微信属合规，不应判为引流违规高风险。
         self.assertFalse(res.is_violation)
 
+    def test_loan_downgrade_cashout_fraud_detected(self):
+        text = (
+            "left:我是贷款平台客户经理，帮您把利息下调，您把账户里剩余的两万块钱先提现，"
+            "提现好之后系统才能检测到您账户，用不上的话随时可以提前还进来，不要担心。"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_violation)
+        self.assertTrue(res.is_fraud)
+        self.assertEqual(res.scene_category, "贷款降息诱导套现诈骗")
+
+    def test_tax_scam_keywords_no_longer_collide_with_generic_loan_terms(self):
+        """个体工商户年报补录收费不应因『营业执照/法人』等通用词与经营贷业务混淆。"""
+        text = (
+            "left:您这个营业执照做经营贷，您是法人吧，流水做一下增量，"
+            "我们收两个点服务费，三十到五十万没问题。"
+        )
+        res = self.agent.inspect(text)
+        self.assertNotEqual(res.scene_category, "个体工商户年报补录收费")
+
+    def test_tax_scam_canonical_case_still_detected(self):
+        text = (
+            "left:我是这边线上税务部中心点的，你这个营业执照还没有年报，"
+            "季度税务申报也没做，可能产生一笔补录费用，把补录交上去。"
+        )
+        res = self.agent.inspect(text)
+        self.assertEqual(res.scene_category, "个体工商户年报补录收费")
+        self.assertTrue(res.is_fraud)
+
 
 class TestSchema(unittest.TestCase):
     def test_round_trip(self):
@@ -163,6 +191,22 @@ class TestLabels(unittest.TestCase):
         self.assertIn("业务口径判定表", brief)
         self.assertIn("AI推广获客服务", brief)
         self.assertIn("证券投资引流", brief)
+
+    def test_wechat_direction_disambiguation_in_brief(self):
+        """微信添加方向判别规则应注入 prompt，降低『我加你』被误判为高风险的概率。"""
+        cfg = Config()
+        kb = KnowledgeBase(cfg.spec_path, cfg.rules_path)
+        brief = kb.rules_brief()
+        self.assertIn("添加方向", brief)
+        self.assertIn("加个微信嘛", brief)
+
+    def test_loan_downgrade_cashout_fraud_registered(self):
+        """新增『贷款降息诱导套现诈骗』应出现在知识库与 prompt 中。"""
+        cfg = Config()
+        kb = KnowledgeBase(cfg.spec_path, cfg.rules_path)
+        cats = [s.get("category") for s in kb.rules.get("fraud_scenarios", [])]
+        self.assertIn("贷款降息诱导套现诈骗", cats)
+        self.assertIn("贷款降息诱导套现诈骗", kb.rules_brief())
 
 
 class TestDedup(unittest.TestCase):
