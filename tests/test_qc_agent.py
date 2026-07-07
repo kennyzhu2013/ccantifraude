@@ -357,5 +357,58 @@ class TestReflectEvolution(unittest.TestCase):
         shutil.rmtree(tmp)
 
 
+class TestExtractJson(unittest.TestCase):
+    def test_plain_json(self):
+        from qc_agent.agent import _extract_json
+
+        text = '{"is_violation": true, "scene_category": "贷款相关"}'
+        obj = _extract_json(text)
+        self.assertTrue(obj["is_violation"])
+        self.assertEqual(obj["scene_category"], "贷款相关")
+
+    def test_markdown_fenced(self):
+        from qc_agent.agent import _extract_json
+
+        text = '分析如下：\n```json\n{"is_violation": false, "risk_level": "合规"}\n```\n完毕'
+        obj = _extract_json(text)
+        self.assertFalse(obj["is_violation"])
+
+    def test_prose_with_embedded_json(self):
+        from qc_agent.agent import _extract_json
+
+        text = (
+            "根据规范判定为违规。\n"
+            '{"is_violation": true, "is_fraud": true, "risk_level": "高风险", '
+            '"scene_category": "证券投资类", "explanation": "引导投资"}'
+        )
+        obj = _extract_json(text)
+        self.assertTrue(obj["is_fraud"])
+        self.assertEqual(obj["scene_category"], "证券投资类")
+
+    def test_nested_strings_do_not_break_parser(self):
+        from qc_agent.agent import _extract_json
+
+        text = (
+            '{"is_violation": true, "evidence_quotes": ["对方说：}不是结束"], '
+            '"scene_category": "贷款相关"}'
+        )
+        obj = _extract_json(text)
+        self.assertEqual(obj["scene_category"], "贷款相关")
+
+    def test_trailing_comma(self):
+        from qc_agent.agent import _extract_json
+
+        text = '{"is_violation": false, "risk_level": "合规",}'
+        obj = _extract_json(text)
+        self.assertFalse(obj["is_violation"])
+
+    def test_prefers_inspection_object_when_multiple(self):
+        from qc_agent.agent import _extract_json
+
+        text = 'tool args {"query": "贷款"} final {"is_violation": true, "scene_category": "贷款相关"}'
+        obj = _extract_json(text)
+        self.assertEqual(obj["scene_category"], "贷款相关")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

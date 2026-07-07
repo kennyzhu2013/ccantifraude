@@ -24,6 +24,8 @@ from .heuristic import HeuristicInspector
 from .knowledge_base import KnowledgeBase
 from .llm import LLMClient
 from .prompts import (
+    _JSON_FORCE,
+    _JSON_REPAIR,
     build_fast_user_message,
     build_system_prompt,
     build_system_prompt_fast,
@@ -40,23 +42,80 @@ def _truncate(content: str, max_chars: int) -> str:
     tail = max_chars - head
     return content[:head] + "\n…（中间省略）…\n" + content[-tail:]
 
-_JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
+_TRAILING_COMMA = re.compile(r",\s*([}\]])")
+_INSPECTION_KEYS = frozenset(
+    {"is_violation", "is_fraud", "risk_level", "scene_category", "explanation"}
+)
+
+
+def _looks_like_inspection_result(obj: Dict[str, Any]) -> bool:
+    return bool(_INSPECTION_KEYS & obj.keys())
+
+
+def _try_parse_json(candidate: str) -> Optional[Dict[str, Any]]:
+    text = (candidate or "").strip()
+    if not text:
+        return None
+    variants = [text, _TRAILING_COMMA.sub(r"\1", text)]
+    for variant in variants:
+        try:
+            obj = json.loads(variant)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def _extract_balanced_object(text: str, start: int) -> Optional[str]:
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """从模型输出中提取质检 JSON，兼容 markdown 包裹、前后说明文字与嵌套字段。"""
     if not text:
         return None
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate = fenced.group(1) if fenced else None
-    if candidate is None:
-        m = _JSON_BLOCK.search(text)
-        candidate = m.group(0) if m else None
-    if candidate is None:
-        return None
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
+
+    candidates: List[str] = []
+    for m in re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE):
+        candidates.append(m.group(1))
+    for i, ch in enumerate(text):
+        if ch == "{":
+            balanced = _extract_balanced_object(text, i)
+            if balanced:
+                candidates.append(balanced)
+
+    best: Optional[Dict[str, Any]] = None
+    for candidate in candidates:
+        obj = _try_parse_json(candidate)
+        if obj is None:
+            continue
+        if _looks_like_inspection_result(obj):
+            return obj
+        if best is None:
+            best = obj
+    return best
 
 
 class QcAgent:
@@ -152,7 +211,7 @@ class QcAgent:
             },
         ]
         msg = self.llm.chat(messages, tools=None)
-        return self._finalize(msg["content"], content, data_id, source="llm-fast")
+        return self._finalize(msg["content"], content, data_id, source="llm-fast", messages=messages)
 
     # ---------- LLM agent loop ----------
     def _inspect_with_llm(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
@@ -211,19 +270,46 @@ class QcAgent:
                 )
         else:
             # 工具回合用尽，强制要求出结论。
-            messages.append(
-                {"role": "user", "content": "请立即停止调用工具，仅输出最终 JSON 结论。"}
-            )
+            messages.append({"role": "user", "content": _JSON_FORCE})
             msg = self.llm.chat(messages, tools=None)
             final_text = msg["content"]
 
-        return self._finalize(final_text, content, data_id, source="llm")
+        return self._finalize(final_text, content, data_id, source="llm", messages=messages)
+
+    def _repair_json_with_llm(
+        self, messages: List[Dict[str, Any]], partial_text: str
+    ) -> Optional[Dict[str, Any]]:
+        """工具回路结束后 JSON 不可解析时，追加一轮无工具修复请求。"""
+        retry_messages = list(messages)
+        if (partial_text or "").strip():
+            retry_messages.append({"role": "assistant", "content": partial_text})
+        retry_messages.append({"role": "user", "content": _JSON_REPAIR})
+        try:
+            msg = self.llm.chat(retry_messages, tools=None)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[warn] JSON 修复请求失败：{exc}")
+            return None
+        payload = _extract_json(msg.get("content") or "")
+        if payload is None and self.verbose:
+            print("[warn] JSON 修复后仍不可解析")
+        return payload
 
     # ---------- 结果归一化 ----------
     def _finalize(
-        self, final_text: str, content: str, data_id: Optional[str], source: str
+        self,
+        final_text: str,
+        content: str,
+        data_id: Optional[str],
+        source: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
     ) -> InspectionResult:
         payload = _extract_json(final_text)
+        if payload is None and messages is not None:
+            payload = self._repair_json_with_llm(messages, final_text)
+            if payload is not None:
+                source = f"{source}-repair"
+
         if payload is None:
             # 模型未给出可解析 JSON，回退启发式并附上模型原文。
             res = self.heuristic.inspect(content, data_id=data_id)

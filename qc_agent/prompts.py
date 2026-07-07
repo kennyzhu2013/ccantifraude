@@ -36,6 +36,14 @@ _OUTPUT = """最终输出要求：仅输出一个 JSON 对象（不要包裹代�
 }
 正常场景：直接给出 is_violation=false、risk_level=合规、explanation 说明未识别到违规话术。"""
 
+_JSON_REPAIR = """你刚才的输出不是合法 JSON，无法被程序解析。
+请根据上文已完成的调查与推理，**仅输出一个 JSON 对象**（不要 markdown 代码块、不要任何前后说明文字）。
+必填字段：is_violation, is_fraud, risk_level, scene_category, scene_subtype, explanation,
+detected_features, evidence_quotes, confidence, analysis_thought。"""
+
+_JSON_FORCE = """请立即停止调用工具，根据已有信息输出最终 JSON 结论。
+仅输出一个 JSON 对象，不要 markdown 代码块、不要任何前后说明文字。"""
+
 
 def build_system_prompt(kb: KnowledgeBase) -> str:
     sections = [

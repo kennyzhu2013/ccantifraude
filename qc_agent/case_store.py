@@ -48,11 +48,20 @@ class CaseStore:
                 content = (row.get("content") or "").strip()
                 if not content:
                     continue
+                data_id = (row.get("data_id") or row.get("callid") or "").strip()
+                comment = (row.get("comment") or "").strip()
+                if not comment:
+                    label = (row.get("label") or "").strip()
+                    category = (row.get("category") or "").strip()
+                    if label and category:
+                        comment = f"{label}，{category}"
+                    else:
+                        comment = label or category
                 self.cases.append(
                     LabeledCase(
-                        data_id=(row.get("data_id") or "").strip(),
+                        data_id=data_id,
                         content=content,
-                        comment=(row.get("comment") or "").strip(),
+                        comment=comment,
                     )
                 )
         if self.cases:
