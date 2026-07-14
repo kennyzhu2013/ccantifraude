@@ -182,7 +182,7 @@ class TestHeuristicInspection(unittest.TestCase):
         res = self.agent.inspect(text)
         self.assertTrue(res.is_violation)
         self.assertTrue(res.is_fraud)
-        self.assertEqual(res.scene_category, "贷款相关-AB贷")
+        self.assertEqual(res.scene_category, "贷款相关-ab贷")
 
     def test_guide_add_private_wechat_fraud(self):
         """平台核资后引导添加下款/放款经理微信，按最新规范判涉诈。"""
@@ -285,7 +285,7 @@ class TestLabels(unittest.TestCase):
             cfg.spec_path, cfg.rules_path, extra_spec_paths=[cfg.latest_spec_path]
         )
         cats = [s.get("category") for s in kb.rules.get("fraud_scenarios", [])]
-        for name in ("贷款相关-AB贷", "引导用户添加私人微信", "路费诈骗"):
+        for name in ("贷款相关-ab贷", "引导用户添加私人微信", "路费诈骗"):
             self.assertIn(name, cats)
             self.assertIn(name, kb.rules_brief())
         # 最新决策表应可检索
