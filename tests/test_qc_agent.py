@@ -173,6 +173,44 @@ class TestHeuristicInspection(unittest.TestCase):
         self.assertEqual(res.scene_category, "个体工商户年报补录收费")
         self.assertTrue(res.is_fraud)
 
+    def test_ab_loan_escalated_to_fraud(self):
+        """最新规范：AB贷（受托支付+背调）升级为涉诈。"""
+        text = (
+            "left:这次走受托支付，需要你提供一个企业账户收款，我们还要对贷后做合法背调，"
+            "提交指定紧急联系人，企业侧双签才能放款。"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_violation)
+        self.assertTrue(res.is_fraud)
+        self.assertEqual(res.scene_category, "贷款相关-AB贷")
+
+    def test_guide_add_private_wechat_fraud(self):
+        """平台核资后引导添加下款/放款经理微信，按最新规范判涉诈。"""
+        text = (
+            "left:人工审核已经通过了，您符合放款条件，需要您添加我们放款经理的企业微信，"
+            "把额度发给下款经理线上走流程。"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_fraud)
+        self.assertEqual(res.scene_category, "引导用户添加私人微信")
+
+    def test_travel_fee_fraud_detected(self):
+        """有薪招聘+仓库路线+入职注册费，判路费诈骗。"""
+        text = (
+            "left:我们物流公司招司机，有集中仓库和固定路线可以驻站，"
+            "入职先交800元平台注册费，承诺第一单就有500补贴。"
+        )
+        res = self.agent.inspect(text)
+        self.assertTrue(res.is_fraud)
+        self.assertEqual(res.scene_category, "路费诈骗")
+
+    def test_fake_invoice_medium_risk_keywords_in_rules(self):
+        """企业代开虚假发票应出现在企业营销风险规则中。"""
+        sc = self.agent.kb.get_scenario("企业营销与招商服务")
+        self.assertIsNotNone(sc)
+        joined = " ".join(sc.get("risk_rules", []))
+        self.assertIn("代开虚假发票", joined)
+
 
 class TestSchema(unittest.TestCase):
     def test_round_trip(self):
@@ -239,6 +277,23 @@ class TestLabels(unittest.TestCase):
         cats = [s.get("category") for s in kb.rules.get("fraud_scenarios", [])]
         self.assertIn("贷款降息诱导套现诈骗", cats)
         self.assertIn("贷款降息诱导套现诈骗", kb.rules_brief())
+
+    def test_latest_spec_fraud_types_registered(self):
+        """对客最新复核规范新增涉诈类目应注册到知识库。"""
+        cfg = Config()
+        kb = KnowledgeBase(
+            cfg.spec_path, cfg.rules_path, extra_spec_paths=[cfg.latest_spec_path]
+        )
+        cats = [s.get("category") for s in kb.rules.get("fraud_scenarios", [])]
+        for name in ("贷款相关-AB贷", "引导用户添加私人微信", "路费诈骗"):
+            self.assertIn(name, cats)
+            self.assertIn(name, kb.rules_brief())
+        # 最新决策表应可检索
+        hits = kb.search_spec("路费诈骗 注册费 固定路线", top_k=3)
+        self.assertTrue(hits)
+        brief = kb.rules_brief()
+        self.assertIn("企业代开虚假发票", brief)
+        self.assertIn("冒充公检法", brief)
 
 
 class TestDedup(unittest.TestCase):

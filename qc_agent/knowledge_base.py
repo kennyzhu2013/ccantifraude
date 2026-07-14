@@ -72,9 +72,15 @@ def _parse_markdown_sections(md_text: str) -> List[SpecSection]:
 
 
 class KnowledgeBase:
-    def __init__(self, spec_path: Path, rules_path: Path):
+    def __init__(
+        self,
+        spec_path: Path,
+        rules_path: Path,
+        extra_spec_paths: Optional[List[Path]] = None,
+    ):
         self.spec_path = Path(spec_path)
         self.rules_path = Path(rules_path)
+        self.extra_spec_paths = [Path(p) for p in (extra_spec_paths or [])]
         self.sections: List[SpecSection] = []
         self.rules: Dict[str, Any] = {}
         self._index = TfidfIndex()
@@ -82,12 +88,22 @@ class KnowledgeBase:
 
     # ---------- 加载 ----------
     def _load(self) -> None:
-        if self.spec_path.exists():
-            md = self.spec_path.read_text(encoding="utf-8")
-            self.sections = _parse_markdown_sections(md)
-            corpus = [f"{s.full_title}\n{s.content}" for s in self.sections]
-            if corpus:
-                self._index.fit(corpus)
+        self.sections = []
+        paths = [self.spec_path] + self.extra_spec_paths
+        for path in paths:
+            if not path.exists():
+                continue
+            md = path.read_text(encoding="utf-8")
+            parsed = _parse_markdown_sections(md)
+            # 额外规范文件加前缀，避免与 V1.1 同名小节冲突。
+            if path != self.spec_path:
+                prefix = path.stem
+                for s in parsed:
+                    s.path = [prefix] + list(s.path)
+            self.sections.extend(parsed)
+        corpus = [f"{s.full_title}\n{s.content}" for s in self.sections]
+        if corpus:
+            self._index.fit(corpus)
         self.rules = self.load_rules()
 
     def load_rules(self) -> Dict[str, Any]:

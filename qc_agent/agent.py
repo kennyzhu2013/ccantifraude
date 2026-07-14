@@ -128,7 +128,11 @@ class QcAgent:
         verbose: bool = False,
     ):
         self.config = config or DEFAULT_CONFIG
-        self.kb = kb or KnowledgeBase(self.config.spec_path, self.config.rules_path)
+        self.kb = kb or KnowledgeBase(
+            self.config.spec_path,
+            self.config.rules_path,
+            extra_spec_paths=[self.config.latest_spec_path],
+        )
         self.cases = cases if cases is not None else CaseStore(self.config.cases_path)
         self.llm = LLMClient(self.config)
         self.tools = ToolRegistry(
