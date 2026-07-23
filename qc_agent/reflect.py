@@ -2,7 +2,9 @@
 
 当主质检 Agent 的判定与人工标签不一致，或从网页/新案例中发现新型话术时，
 反射 Agent 分析盲区、提炼新特征，并把知识固化回 rules.json：
-    - 新增高危关键词 → 对应场景 keywords
+    - 新增高危候选词 → 对应场景 candidate_keywords 暂存区（隔离审核，
+      不直接进入生产 keywords；经人工 promote 后才被启发式/工具消费，
+      避免 n-gram/LLM 噪声词污染线上判定）
     - 沉淀错题本 → evolved_examples（下次作为 few-shot 注入主 Agent）
 这正是 learn-claude-code 记忆体系『选择/提炼/固化』在反诈领域的落地。
 """
@@ -200,10 +202,16 @@ class ReflectAgent:
         for bucket in ("violation_scenarios", "fraud_scenarios"):
             for sc in rules.get(bucket, []):
                 if sc.get("category") == category:
-                    kws = sc.setdefault("keywords", [])
+                    # 隔离审核：演进词先进 candidate_keywords 暂存区，不直接写入
+                    # 生产 keywords（启发式与 get_scenario 工具消费），经人工
+                    # promote_candidates 审核后才生效，避免噪声词污染线上判定。
+                    kws = sc.get("keywords", [])
+                    cands = sc.setdefault("candidate_keywords", [])
                     for kw in proposal.new_keywords:
-                        if kw and kw not in kws:
-                            kws.append(kw)
+                        if kw and kw not in kws and kw not in cands:
+                            cands.append(kw)
+                    if not cands:
+                        sc.pop("candidate_keywords", None)
 
         evolved = rules.setdefault("evolved_examples", [])
         evolved.append(
@@ -304,3 +312,44 @@ def _first_json(text: str) -> str:
 
     m = re.search(r"\{.*\}", text or "", re.DOTALL)
     return m.group(0) if m else "{}"
+
+
+# ---------- 候选关键词审核（暂存区 -> 生产） ----------
+def list_candidate_keywords(kb) -> Dict[str, List[str]]:
+    """category -> 待审核候选关键词（演进暂存区）。"""
+    out: Dict[str, List[str]] = {}
+    for bucket in ("violation_scenarios", "fraud_scenarios"):
+        for sc in kb.rules.get(bucket, []):
+            cands = sc.get("candidate_keywords", [])
+            if cands:
+                out[sc.get("category", "")] = list(cands)
+    return out
+
+
+def review_candidates(
+    kb, category: str, keywords: Optional[List[str]] = None, promote: bool = True
+) -> List[str]:
+    """人工审核候选词：promote=True 晋升进生产 keywords，False 丢弃。
+
+    keywords=None 表示处理该类目全部候选词；返回实际处理的词列表。
+    """
+    processed: List[str] = []
+    for bucket in ("violation_scenarios", "fraud_scenarios"):
+        for sc in kb.rules.get(bucket, []):
+            if sc.get("category") != category:
+                continue
+            cands = sc.get("candidate_keywords", [])
+            targets = list(cands) if keywords is None else [k for k in keywords if k in cands]
+            if not targets:
+                continue
+            kws = sc.setdefault("keywords", [])
+            for kw in targets:
+                cands.remove(kw)
+                if promote and kw not in kws:
+                    kws.append(kw)
+                processed.append(kw)
+            if not cands:
+                sc.pop("candidate_keywords", None)
+    if processed:
+        kb.save_rules(kb.rules)
+    return processed

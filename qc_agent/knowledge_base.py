@@ -71,6 +71,16 @@ def _parse_markdown_sections(md_text: str) -> List[SpecSection]:
     return [s for s in sections if s.title]
 
 
+def _disambig_title(entry: str) -> str:
+    """提取消歧条目短标题，作为 system prompt 常驻索引（正文按需注入）。"""
+    if entry.startswith("【"):
+        end = entry.find("】")
+        if end > 0:
+            return entry[: end + 1]
+    head = entry.split("：", 1)[0]
+    return head if len(head) <= 40 else head[:40] + "…"
+
+
 class KnowledgeBase:
     def __init__(
         self,
@@ -84,6 +94,7 @@ class KnowledgeBase:
         self.sections: List[SpecSection] = []
         self.rules: Dict[str, Any] = {}
         self._index = TfidfIndex()
+        self._disambig_index = TfidfIndex()
         self._load()
 
     # ---------- 加载 ----------
@@ -105,6 +116,10 @@ class KnowledgeBase:
         if corpus:
             self._index.fit(corpus)
         self.rules = self.load_rules()
+        # 消歧规则单独建索引：正文不再全量常驻 prompt，而是按通话文本检索命中后注入。
+        disambig = self.rules.get("disambiguation", [])
+        if disambig:
+            self._disambig_index.fit(disambig)
 
     def load_rules(self) -> Dict[str, Any]:
         if self.rules_path.exists():
@@ -123,6 +138,14 @@ class KnowledgeBase:
         hits = self._index.search(query, top_k=top_k)
         return [self.sections[i] for i, _ in hits]
 
+    def relevant_disambiguation(self, text: str, top_k: int = 6) -> List[str]:
+        """检索与通话文本最相关的消歧规则全文（分层注入的『按需加载』部分）。"""
+        entries = list(self.rules.get("disambiguation", []))
+        if not entries or not (text or "").strip():
+            return []
+        hits = self._disambig_index.search(text, top_k=top_k)
+        return [entries[i] for i, _ in hits]
+
     def list_scenarios(self) -> Dict[str, List[str]]:
         return {
             "违规场景": [s.get("category", "") for s in self.rules.get("violation_scenarios", [])],
@@ -134,6 +157,8 @@ class KnowledgeBase:
             for sc in self.rules.get(bucket, []):
                 if sc.get("category") == category:
                     out = dict(sc)
+                    # 演进暂存区未经人工审核，不暴露给 LLM 工具/启发式消费。
+                    out.pop("candidate_keywords", None)
                     out["_bucket"] = bucket
                     return out
         return None
@@ -174,9 +199,11 @@ class KnowledgeBase:
                 lines.append(line)
         disambig = self.rules.get("disambiguation", [])
         if disambig:
-            lines.append("【易混场景子类目判别（重要，先按此消歧再定类目）】")
+            lines.append(
+                "【易混场景子类目判别索引（仅列标题；与当前通话相关条目的全文会随待检文本一并给出，先按其消歧再定类目）】"
+            )
             for d in disambig:
-                lines.append(f"- {d}")
+                lines.append(f"- {_disambig_title(d)}")
         evolved = self.rules.get("evolved_examples", [])
         if evolved:
             lines.append("【已自动演进沉淀的边缘案例（错题本）】")

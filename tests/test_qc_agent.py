@@ -113,15 +113,45 @@ class TestHeuristicInspection(unittest.TestCase):
         # 外呼人员主动添加个人微信属合规，不应判为引流违规高风险。
         self.assertFalse(res.is_violation)
 
-    def test_loan_downgrade_cashout_fraud_detected(self):
+    def test_loan_downgrade_cashout_is_violation_not_fraud(self):
         text = (
             "left:我是贷款平台客户经理，帮您把利息下调，您把账户里剩余的两万块钱先提现，"
             "提现好之后系统才能检测到您账户，用不上的话随时可以提前还进来，不要担心。"
         )
         res = self.agent.inspect(text)
+        # 最新规范口径：引导用户平台操作提现=【贷款相关】违规高风险，非涉诈。
         self.assertTrue(res.is_violation)
+        self.assertFalse(res.is_fraud)
+        self.assertEqual(res.scene_category, "贷款相关")
+        self.assertEqual(res.risk_level, RiskLevel.HIGH)
+
+    def test_credit_score_inquiry_is_rental_fraud(self):
+        text = (
+            "left:咱们这边不看征信，您支付宝的芝麻信用分有多少分？截个图发我，"
+            "分数够的话帮您在租赁平台走个额度出来周转。"
+        )
+        res = self.agent.inspect(text)
+        # 最新口径：非银行渠道要求/询问芝麻信用分 → 手机租赁套路贷诈骗（涉诈）。
         self.assertTrue(res.is_fraud)
-        self.assertEqual(res.scene_category, "贷款降息诱导套现诈骗")
+        self.assertEqual(res.scene_category, "手机租赁套路贷诈骗")
+
+    def test_keyword_match_case_insensitive(self):
+        text = "left:免费送您一台pos机，激活后刷够流水才能提现，先垫五十九块钱运费。"
+        res = self.agent.inspect(text)
+        # 关键词库为『POS机』，转写为小写也应命中（大小写不敏感）。
+        self.assertTrue(res.is_violation)
+        self.assertEqual(res.scene_category, "商品推销")
+
+    def test_kantouxi_requires_amount(self):
+        # 『到手』后跟金额 → 砍头息高风险。
+        text = "left:我们这边放款快，借一万到手八千，每天还五百五，网贷不上征信。"
+        res = self.agent.inspect(text)
+        self.assertEqual(res.scene_category, "贷款相关")
+        self.assertEqual(res.risk_level, RiskLevel.HIGH)
+        # 日常表述『钱到手了』不应误升高风险。
+        text2 = "left:您在拍拍贷申请的网贷已经放款，钱到手了记得按时还款就行。"
+        res2 = self.agent.inspect(text2)
+        self.assertNotEqual(res2.risk_level, RiskLevel.HIGH)
 
     def test_tax_scam_keywords_no_longer_collide_with_generic_loan_terms(self):
         """个体工商户年报补录收费不应因『营业执照/法人』等通用词与经营贷业务混淆。"""
@@ -224,10 +254,26 @@ class TestHeuristicInspection(unittest.TestCase):
         self.assertIn("淘宝闪购", brief)
 
     def test_official_account_same_fraud_pattern_in_disambig(self):
-        """关注公众号后对接放款经理应为相同套路（涉诈），不是不同套路。"""
+        """关注公众号后对接放款经理应为相同套路（涉诈），分层注入下按检索命中。"""
+        entries = self.agent.kb.relevant_disambiguation(
+            "贷款推销，引导关注公众号对接放款经理加微信"
+        )
+        joined = " ".join(entries)
+        self.assertIn("公众号", joined)
+        self.assertIn("相同套路", joined)
+
+    def test_disambiguation_layered_injection(self):
+        """分层注入：brief 只常驻消歧标题索引，正文按待检文本检索命中后才注入。"""
         brief = self.agent.kb.rules_brief()
-        self.assertIn("公众号", brief)
-        self.assertIn("相同套路", brief)
+        # 标题索引常驻。
+        self.assertIn("易混场景子类目判别索引", brief)
+        self.assertIn("【最新规范·芝麻信用分】", brief)
+        # 消歧正文的长尾细节不再全量常驻（降 token）。
+        self.assertNotIn("不要仅凭出现『微信』二字就判高风险", brief)
+        # 但能按待检文本检索回全文。
+        entries = self.agent.kb.relevant_disambiguation("加个微信嘛，我加一下你微信发资料")
+        self.assertTrue(any("添加方向" in e for e in entries))
+
 
 class TestSchema(unittest.TestCase):
     def test_round_trip(self):
@@ -263,6 +309,16 @@ class TestLabels(unittest.TestCase):
         self.assertTrue(category_matches("证券投资类", {"证券投资类"}))
         self.assertTrue(category_matches("任意", set()))  # 无法归一化时不计入
 
+    def test_non_fraud_hints_latest_spec(self):
+        from qc_agent.labels import expected_is_fraud
+
+        # 最新口径：违规非涉诈场景不应因『套路贷/退费』字样误判涉诈。
+        self.assertFalse(expected_is_fraud("贷款相关：引导平台操作提现，偏套路贷"))
+        self.assertFalse(expected_is_fraud("法律服务：帮退律所费用，成功后收一半服务费"))
+        # 涉诈类目仍应判涉诈。
+        self.assertTrue(expected_is_fraud("网贷平台退息退费"))
+        self.assertTrue(expected_is_fraud("手机租赁套路贷诈骗"))
+
     def test_compliant_label(self):
         from qc_agent.labels import is_compliant_label
 
@@ -280,32 +336,31 @@ class TestLabels(unittest.TestCase):
         self.assertIn("证券投资引流", brief)
 
     def test_wechat_direction_disambiguation_in_brief(self):
-        """微信添加方向判别规则应注入 prompt，降低『我加你』被误判为高风险的概率。"""
+        """微信添加方向判别规则：标题常驻 brief，全文按检索命中注入。"""
         cfg = Config()
         kb = KnowledgeBase(cfg.spec_path, cfg.rules_path)
-        brief = kb.rules_brief()
-        self.assertIn("添加方向", brief)
-        self.assertIn("加个微信嘛", brief)
+        self.assertIn("添加方向", kb.rules_brief())
+        entries = kb.relevant_disambiguation("加个微信嘛，方便的话我加一下你")
+        joined = " ".join(entries)
+        self.assertIn("加个微信嘛", joined)
 
-    def test_loan_downgrade_cashout_fraud_registered(self):
-        """新增『贷款降息诱导套现诈骗』应出现在知识库与 prompt 中。"""
+    def test_loan_downgrade_cashout_retired_from_fraud(self):
+        """最新规范口径：『贷款降息诱导套现诈骗』已撤销，并入【贷款相关·引导用户平台操作提现】违规高风险。"""
         cfg = Config()
         kb = KnowledgeBase(cfg.spec_path, cfg.rules_path)
         cats = [s.get("category") for s in kb.rules.get("fraud_scenarios", [])]
-        self.assertIn("贷款降息诱导套现诈骗", cats)
-        self.assertIn("贷款降息诱导套现诈骗", kb.rules_brief())
+        self.assertNotIn("贷款降息诱导套现诈骗", cats)
+        self.assertIn("引导用户平台操作提现", kb.rules_brief())
 
     def test_latest_spec_fraud_types_registered(self):
         """对客最新复核规范新增涉诈类目应注册到知识库。"""
         cfg = Config()
-        kb = KnowledgeBase(
-            cfg.spec_path, cfg.rules_path, extra_spec_paths=[cfg.latest_spec_path]
-        )
+        kb = KnowledgeBase(cfg.spec_path, cfg.rules_path)
         cats = [s.get("category") for s in kb.rules.get("fraud_scenarios", [])]
         for name in ("贷款相关-ab贷", "引导贷款用户添加第三方微信", "套路运诈骗"):
             self.assertIn(name, cats)
             self.assertIn(name, kb.rules_brief())
-        # 最新决策表应可检索
+        # 最新规范口径已合入 spec.md，应可检索
         hits = kb.search_spec("套路运诈骗 注册费 固定路线", top_k=3)
         self.assertTrue(hits)
         brief = kb.rules_brief()
@@ -427,6 +482,45 @@ class TestReflectEvolution(unittest.TestCase):
         self.assertEqual(stats["total"], len(store))
         after = len(json.loads(rules_copy.read_text(encoding="utf-8")).get("evolved_examples", []))
         self.assertGreaterEqual(after, before)
+        shutil.rmtree(tmp)
+
+    def test_candidate_keywords_isolated_until_promoted(self):
+        """演进词先进暂存区：不污染生产 keywords，审核晋升/丢弃后才变更。"""
+        import tempfile, shutil
+        from qc_agent.reflect import (
+            EvolutionProposal,
+            list_candidate_keywords,
+            review_candidates,
+        )
+
+        cfg = _offline_config()
+        tmp = Path(tempfile.mkdtemp())
+        rules_copy = tmp / "rules.json"
+        shutil.copy(cfg.rules_path, rules_copy)
+        kb = KnowledgeBase(cfg.spec_path, rules_copy)
+        agent = QcAgent(config=cfg, kb=kb, cases=CaseStore(SAMPLE_CSV))
+        reflector = ReflectAgent(agent)
+
+        proposal = EvolutionProposal(
+            need_evolution=True,
+            target_category="贷款相关",
+            new_keywords=["测试噪声词甲", "测试噪声词乙"],
+            pattern_update="贷款相关：单测演进隔离",
+        )
+        self.assertTrue(reflector.apply("left:测试内容", "贷款相关", proposal))
+
+        # 未审核：不入生产 keywords，启发式与 get_scenario 均不可见。
+        self.assertNotIn("测试噪声词甲", kb.all_keywords().get("贷款相关", []))
+        sc = kb.get_scenario("贷款相关")
+        self.assertNotIn("candidate_keywords", sc)
+        self.assertIn("贷款相关", list_candidate_keywords(kb))
+
+        # 晋升甲、丢弃乙：甲进生产，乙消失，暂存区清空。
+        review_candidates(kb, "贷款相关", keywords=["测试噪声词甲"], promote=True)
+        review_candidates(kb, "贷款相关", keywords=["测试噪声词乙"], promote=False)
+        self.assertIn("测试噪声词甲", kb.all_keywords().get("贷款相关", []))
+        self.assertNotIn("测试噪声词乙", kb.all_keywords().get("贷款相关", []))
+        self.assertEqual(list_candidate_keywords(kb), {})
         shutil.rmtree(tmp)
 
 

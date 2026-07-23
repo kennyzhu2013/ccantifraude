@@ -82,10 +82,6 @@ class Config:
 
     # ---- 知识与数据路径 ----
     spec_path: Path = field(default_factory=lambda: PROJECT_ROOT / "knowledge" / "spec.md")
-    # 对客最新复核规范决策表（与 spec.md 一并纳入检索索引）。
-    latest_spec_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / "knowledge" / "latest_decision_table.md"
-    )
     rules_path: Path = field(default_factory=lambda: PROJECT_ROOT / "knowledge" / "rules.json")
     cases_path: Path = field(
         default_factory=lambda: Path(
@@ -95,6 +91,8 @@ class Config:
 
     # ---- 检索参数 ----
     retrieve_top_k: int = field(default_factory=lambda: int(os.getenv("QC_RETRIEVE_TOP_K", "3")))
+    # 分层注入：随待检文本注入的相关消歧规则条数（system prompt 仅常驻标题索引）。
+    disambig_top_k: int = field(default_factory=lambda: int(os.getenv("QC_DISAMBIG_TOP_K", "6")))
 
     @property
     def llm_enabled(self) -> bool:

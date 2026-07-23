@@ -67,8 +67,12 @@ def build_system_prompt_fast(kb: KnowledgeBase) -> str:
     return "\n\n".join(sections)
 
 
-def build_fast_user_message(content, similar_block: str, spec_block: str) -> str:
+def build_fast_user_message(
+    content, similar_block: str, spec_block: str, disambig_block: str = ""
+) -> str:
     parts = ["请对以下通话转写文本进行反诈质检，直接输出 JSON 结论（不要调用工具、不要多余文字）。"]
+    if disambig_block:
+        parts.append("【与本通话相关的易混场景消歧规则（重要，先按此消歧再定类目）】\n" + disambig_block)
     if spec_block:
         parts.append("【可参考的规范小节】\n" + spec_block)
     if similar_block:

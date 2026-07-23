@@ -6,9 +6,16 @@
 
     python scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache
 
-如需让反射 Agent 自动把冲突沉淀为新规则（高危词 + 错题本），显式加 --apply：
+如需让反射 Agent 自动把冲突沉淀为新规则（候选高危词 + 错题本），显式加 --apply：
 
     python scripts/evolve.py --csv data/real_cases.csv --apply
+
+演进词仅进入 candidate_keywords 暂存区，不影响线上判定；人工审核后晋升/丢弃：
+
+    python scripts/evolve.py --list-candidates                     # 查看待审核候选词
+    python scripts/evolve.py --promote 贷款相关                    # 晋升该类目全部候选词
+    python scripts/evolve.py --promote 贷款相关 --kw 砍头息 提前收费  # 只晋升指定词
+    python scripts/evolve.py --discard 贷款相关                    # 丢弃该类目全部候选词
 """
 from __future__ import annotations
 
@@ -22,7 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qc_agent import Config, QcAgent  # noqa: E402
 from qc_agent.case_store import CaseStore  # noqa: E402
-from qc_agent.reflect import ReflectAgent  # noqa: E402
+from qc_agent.knowledge_base import KnowledgeBase  # noqa: E402
+from qc_agent.reflect import (  # noqa: E402
+    ReflectAgent,
+    list_candidate_keywords,
+    review_candidates,
+)
 
 
 def _write_csv(path: Path, rows: list) -> None:
@@ -44,11 +56,36 @@ def main() -> int:
     parser.add_argument("--tools", action="store_true", help="使用完整 agentic tool loop（更准更慢）")
     parser.add_argument("--cache", action="store_true", help="启用结果缓存")
     parser.add_argument("--cache-path", default=".cache/qc_results.jsonl")
-    parser.add_argument("--apply", action="store_true", help="额外让反射 Agent 自动演进 rules.json（默认不改）")
+    parser.add_argument("--apply", action="store_true", help="额外让反射 Agent 自动演进 rules.json（候选词进暂存区，默认不改）")
+    parser.add_argument("--list-candidates", action="store_true", help="列出待审核的演进候选关键词后退出")
+    parser.add_argument("--promote", metavar="类目", help="审核通过：把该类目候选词晋升进生产 keywords 后退出")
+    parser.add_argument("--discard", metavar="类目", help="审核不通过：丢弃该类目候选词后退出")
+    parser.add_argument("--kw", nargs="*", help="配合 --promote/--discard：只处理指定候选词（缺省全部）")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
     config = Config()
+
+    # ---- 候选词审核子命令（不需要语料/模型，直接操作 rules.json 后退出）----
+    if args.list_candidates or args.promote or args.discard:
+        kb = KnowledgeBase(config.spec_path, config.rules_path)
+        if args.list_candidates:
+            cands = list_candidate_keywords(kb)
+            if not cands:
+                print("暂存区为空：没有待审核的演进候选关键词。")
+            for cat, kws in cands.items():
+                print(f"  {cat}：{' / '.join(kws)}")
+            return 0
+        category = args.promote or args.discard
+        promote = bool(args.promote)
+        processed = review_candidates(kb, category, keywords=args.kw or None, promote=promote)
+        action = "晋升进生产 keywords" if promote else "丢弃"
+        if processed:
+            print(f"【{category}】已{action} {len(processed)} 个候选词：{' / '.join(processed)}")
+        else:
+            print(f"【{category}】无匹配的候选词可处理。")
+        return 0
+
     if args.cache and not config.cache_path:
         config.cache_path = args.cache_path
     csv_path = Path(args.csv) if args.csv else config.cases_path
@@ -107,6 +144,8 @@ def main() -> int:
         print("\n--apply：让反射 Agent 自动演进 rules.json ...")
         stats = reflector.evolve_from_cases(store, limit=args.limit, verbose=not args.quiet)
         print(f"演进：判定分歧 {stats['conflicts']}，成功固化 {stats['evolved']} 条到 {config.rules_path}")
+        print("提示：新提炼的关键词仅进入 candidate_keywords 暂存区，不影响线上判定；"
+              "用 --list-candidates 查看，--promote/--discard 审核。")
 
     return 0
 

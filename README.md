@@ -56,7 +56,7 @@
    ┌──────────────────────────────────────────────┐
    │     反射/演进 Agent (ReflectAgent)             │  ← 与人工标签不符时触发
    │   对比 [Agent结论] vs [人工comment]            │
-   │   提炼新高危词/错题本 -> 写回 rules.json        │  自治闭环：越用越准
+   │   候选高危词进暂存区/错题本 -> 写回 rules.json │  自治闭环：候选词经人工审核后生效
    └──────────────────────────────────────────────┘
 ```
 
@@ -83,8 +83,7 @@
 ```
 .
 ├── knowledge/
-│   ├── spec.md                      # 质检规范原文 V1.1（被切成可检索小节）
-│   ├── latest_decision_table.md     # 对客反诈最新复核规范（决策表口径）
+│   ├── spec.md                      # 质检规范原文（已对齐对客反诈最新复核规范，被切成可检索小节）
 │   └── rules.json                   # 结构化反诈知识库（场景/风险规则/关键词/错题本，可被自动演进）
 ├── data/
 │   └── sample_cases.csv   # 人工复核标注样例（data_id,content,comment）
@@ -170,15 +169,21 @@ python3 scripts/inspect_text.py --tools -f call.txt      # 完整 agentic tool l
 # 默认：只导出『规范判定 vs 人工标签』冲突，交人工裁决（不改规则，安全）
 python3 scripts/evolve.py --csv data/your_labeled.csv --out conflicts.csv --cache --workers 8
 
-# 谨慎：让反射 Agent 把冲突自动沉淀为新规则（高危词 + 错题本）
+# 谨慎：让反射 Agent 把冲突自动沉淀为新规则（候选高危词 + 错题本）
 python3 scripts/evolve.py --csv data/your_labeled.csv --apply
+
+# 候选词审核：演进词仅进暂存区不影响线上，人工确认后晋升/丢弃
+python3 scripts/evolve.py --list-candidates
+python3 scripts/evolve.py --promote 贷款相关 --kw 某候选词   # 晋升进生产 keywords
+python3 scripts/evolve.py --discard 贷款相关               # 丢弃该类目全部候选词
 ```
 
 - **冲突导出（默认）**：扫描全量，找出模型判定与人工 `comment` 不一致的样本，导出含冲突类型、
   模型判定/说明/原文片段的 CSV，供人工裁决以哪边为准——这是真实噪声标签下的稳妥做法。
-- **`--apply`（自治演进）**：把案例归类到最匹配场景、提炼高危词写回，并把『错题』沉淀进
-  `rules.json` 的 `evolved_examples`（下次作为 few-shot 注入），实现零人工改代码的规则自演进。
-  注意：人工标签有噪声时谨慎使用，避免学到错误信号。
+- **`--apply`（自治演进）**：把案例归类到最匹配场景、提炼高危词写入 `candidate_keywords`
+  暂存区（不直接进生产 `keywords`，启发式与 LLM 工具均不消费，避免 n-gram/LLM 噪声词
+  污染线上判定），并把『错题』沉淀进 `rules.json` 的 `evolved_examples`（下次作为 few-shot
+  注入）。候选词经 `--promote` 人工审核后才生效，`--discard` 丢弃。
 
 ---
 
@@ -249,7 +254,7 @@ python3 scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache 
 | **C_待人工复核** | 模型判正常但话术不像典型招商加盟 | 人工再确认，避免漏放 |
 
 生成文件：`conflicts.csv`（全部）+ `conflicts_A_*.csv` / `conflicts_B_*.csv` / `conflicts_C_*.csv`（分桶）。
-确需让反射 Agent 自动把冲突沉淀为规则时，显式加 `--apply`（谨慎，避免学到噪声）。
+确需让反射 Agent 自动把冲突沉淀为规则时，显式加 `--apply`（候选词进暂存区，经 `--promote` 审核后才生效，避免学到噪声）。
 
 ### 业务口径判定表（已编码进 `rules.json` 的 `business_decision_table`，prompt 最高优先级）
 
@@ -292,7 +297,7 @@ python3 scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache 
 |---|---|---|
 | 引流第三方平台 | 8 | 已逐条核对『微信添加方向』，均为用户被引导执行添加动作 |
 | 验证码/短信转发诈骗 | 7 | 新增类目，全部为冒充装修/宽带续约索要验证码的真实诈骗话术 |
-| 贷款相关（AB贷/降息套现等） | 7 | 含新增的『贷款降息诱导套现诈骗』，均为中安贷类真实诈骗脚本 |
+| 贷款相关（AB贷/降息套现等） | 7 | 含当时新增的『贷款降息诱导套现诈骗』（后按最新规范口径撤销，并入贷款相关高风险违规），均为中安贷类真实诈骗脚本 |
 | 手机租赁套路贷诈骗 | 2 | 复用此前已验证的招募区域服务商变体规则 |
 | 违规催收（严重情形） | 2 | 全网公开身份证号/冒充纪检机关等极端手段，经排查确认旧基线判高风险正确，已修复我们的默认低风险漏判 |
 | 其他（机票/年报/网贷退费/敏感信息各1） | 6 | 均逐条核对原文匹配对应场景定义 |
@@ -321,18 +326,24 @@ python3 scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache 
 - **知识与代码分离**：判定规则集中在 `knowledge/`，改规则不改代码；反射 Agent 直接演进知识文件。
 - **harness 而非 workflow**：工具是原子、可组合的，是否调用、调用顺序由模型决定，而非硬编码流程，符合 learn-claude-code 的核心主张。
 
-## 9. 对客最新复核规范同步（rules.json v1.3）
+## 9. 对客最新复核规范同步（rules.json v1.4）
 
-已用**未损坏 UTF-8 原文 CSV**逐字入库（`knowledge/latest_decision_table.csv`），并同步 `latest_decision_table.md` / `rules.json`。
+最新复核规范口径已逐字合入 `knowledge/spec.md` 与 `knowledge/rules.json`（决策表以 `rules.json` 的 `business_decision_table` 为唯一事实源，独立决策表文件已移除）。
 
 | 变更 | 口径 |
 |---|---|
 | **贷款相关-ab贷** | 升级为涉诈（第三方账户代收/过款/风控背调/资金断流/双签） |
 | **引导贷款用户添加第三方微信** | 新增涉诈（含公众号对接=相同套路；常见安逸花/分期乐） |
 | **套路运诈骗** | 新增涉诈（800 元注册费/开卡费，做满一个月退 500） |
-| 贷款相关 | 违规提取公积金=中风险；清除数据协助下款收费=中风险；引导平台操作提现=高风险 |
+| 贷款相关 | 违规提取公积金=中风险；清除数据协助下款收费=中风险；引导平台操作提现=高风险违规（非涉诈，含降息/费率下调诱导先提现变体，v1.4 已撤销演进类目『贷款降息诱导套现诈骗』） |
 | 芝麻信用分 | 非银行渠道要求/询问 → 手机租赁套路贷诈骗 |
 | 企业营销 | 淘宝闪购=合规；虚开成本票/重点人群补贴申报=中风险；服务营销提前收费=低风险 |
 | 法律服务 / 催收 | 帮退律所费用收一半=高风险；冒充法院/司法调节站/诉讼中心催收=高风险 |
 
-演进补充（验证码转发、降息套现、设备租赁招商变体）仍保留在 `rules.json`。
+演进补充（验证码转发、设备租赁招商变体）仍保留在 `rules.json`；降息套现已按最新规范口径降为【贷款相关】违规高风险（非涉诈）。
+
+
+## TODO：（人工添加的）
+1. web_search改成另一个案例发现agent的收集网上信息结果，或者直接让将网上几十个网站的诈骗案例都收集到一个文件中喂给AI，让AI自己去分析，看是否有新的发现，如果有，就更新规则。
+2. `--apply`（自治演进）另外接入额外的高端模型，比如 GPT-5，看是否能有更好的效果。
+3. 相似度检索用jieba / scikit-learn / faiss 等工具替换TF-IDF，看是否能有更好的效果。

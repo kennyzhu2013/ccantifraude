@@ -131,7 +131,6 @@ class QcAgent:
         self.kb = kb or KnowledgeBase(
             self.config.spec_path,
             self.config.rules_path,
-            extra_spec_paths=[self.config.latest_spec_path],
         )
         self.cases = cases if cases is not None else CaseStore(self.config.cases_path)
         self.llm = LLMClient(self.config)
@@ -198,6 +197,11 @@ class QcAgent:
         return res
 
     # ---------- 快速模式：检索增强单轮 ----------
+    def _disambig_block(self, clipped: str) -> str:
+        """分层注入：system prompt 只常驻消歧标题索引，命中的正文随待检文本给出。"""
+        entries = self.kb.relevant_disambiguation(clipped, top_k=self.config.disambig_top_k)
+        return "\n".join(f"- {e}" for e in entries)
+
     def _inspect_fast(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
         clipped = _truncate(content, self.config.max_content_chars)
         # 排除当前样本自身，避免评估时把『标准答案』当相似判例泄漏给模型。
@@ -211,7 +215,9 @@ class QcAgent:
             {"role": "system", "content": build_system_prompt_fast(self.kb)},
             {
                 "role": "user",
-                "content": build_fast_user_message(clipped, similar_block, spec_block),
+                "content": build_fast_user_message(
+                    clipped, similar_block, spec_block, self._disambig_block(clipped)
+                ),
             },
         ]
         msg = self.llm.chat(messages, tools=None)
@@ -221,15 +227,18 @@ class QcAgent:
     def _inspect_with_llm(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
         system_prompt = build_system_prompt(self.kb)
         clipped = _truncate(content, self.config.max_content_chars)
+        user_parts = [
+            "请对以下通话转写文本进行反诈质检，按系统要求先调查再输出 JSON 结论。"
+        ]
+        disambig_block = self._disambig_block(clipped)
+        if disambig_block:
+            user_parts.append(
+                "【与本通话相关的易混场景消歧规则（重要，先按此消歧再定类目）】\n" + disambig_block
+            )
+        user_parts.append(f"【通话转写文本】\n{clipped}")
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    "请对以下通话转写文本进行反诈质检，按系统要求先调查再输出 JSON 结论。\n\n"
-                    f"【通话转写文本】\n{clipped}"
-                ),
-            },
+            {"role": "user", "content": "\n\n".join(user_parts)},
         ]
         tool_schemas = self.tools.openai_schemas()
 
