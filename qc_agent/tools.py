@@ -53,10 +53,14 @@ class ToolRegistry:
             return f"未找到场景『{category}』。可选场景：{json.dumps(avail, ensure_ascii=False)}"
         return json.dumps(sc, ensure_ascii=False, indent=2)
 
-    def _retrieve_similar_cases(self, text: str, top_k: Optional[int] = None) -> str:
+    def _retrieve_similar_cases(
+        self, text: str, top_k: Optional[int] = None, exclude_id: Optional[str] = None
+    ) -> str:
         if not self.cases or len(self.cases) == 0:
             return "暂无人工标注判例库。"
-        hits = self.cases.retrieve_with_scores(text, top_k=top_k or self.top_k)
+        hits = self.cases.retrieve_with_scores(
+            text, top_k=top_k or self.top_k, exclude_id=exclude_id
+        )
         if not hits:
             return "未检索到相似人工判例。"
         out = []

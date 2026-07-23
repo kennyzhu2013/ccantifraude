@@ -4,5 +4,12 @@ __pycache__/
 .venv/
 venv/
 results.csv
+conflicts*.csv
+random100_review.csv
+.cache/
+cache/
 *.egg-info/
 .pytest_cache/
+
+# 真实人工标注语料（含业务数据，不入库）
+data/real_cases.csv

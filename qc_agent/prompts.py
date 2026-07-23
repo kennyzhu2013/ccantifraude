@@ -36,6 +36,14 @@ _OUTPUT = """最终输出要求：仅输出一个 JSON 对象（不要包裹代�
 }
 正常场景：直接给出 is_violation=false、risk_level=合规、explanation 说明未识别到违规话术。"""
 
+_JSON_REPAIR = """你刚才的输出不是合法 JSON，无法被程序解析。
+请根据上文已完成的调查与推理，**仅输出一个 JSON 对象**（不要 markdown 代码块、不要任何前后说明文字）。
+必填字段：is_violation, is_fraud, risk_level, scene_category, scene_subtype, explanation,
+detected_features, evidence_quotes, confidence, analysis_thought。"""
+
+_JSON_FORCE = """请立即停止调用工具，根据已有信息输出最终 JSON 结论。
+仅输出一个 JSON 对象，不要 markdown 代码块、不要任何前后说明文字。"""
+
 
 def build_system_prompt(kb: KnowledgeBase) -> str:
     sections = [
@@ -46,3 +54,28 @@ def build_system_prompt(kb: KnowledgeBase) -> str:
         _OUTPUT,
     ]
     return "\n\n".join(sections)
+
+
+def build_system_prompt_fast(kb: KnowledgeBase) -> str:
+    """快速模式（检索增强单轮）：不暴露工具，相关知识在 user 消息中直接给出。"""
+    sections = [
+        _ROLE,
+        _PRINCIPLE,
+        "【知识库规则总览】\n" + kb.rules_brief(),
+        _OUTPUT,
+    ]
+    return "\n\n".join(sections)
+
+
+def build_fast_user_message(
+    content, similar_block: str, spec_block: str, disambig_block: str = ""
+) -> str:
+    parts = ["请对以下通话转写文本进行反诈质检，直接输出 JSON 结论（不要调用工具、不要多余文字）。"]
+    if disambig_block:
+        parts.append("【与本通话相关的易混场景消歧规则（重要，先按此消歧再定类目）】\n" + disambig_block)
+    if spec_block:
+        parts.append("【可参考的规范小节】\n" + spec_block)
+    if similar_block:
+        parts.append("【最相似的人工历史判例（few-shot，对齐人工口径，仅供参考勿照抄）】\n" + similar_block)
+    parts.append("【待质检通话转写文本】\n" + content)
+    return "\n\n".join(parts)

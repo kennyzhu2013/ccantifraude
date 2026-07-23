@@ -48,11 +48,20 @@ class CaseStore:
                 content = (row.get("content") or "").strip()
                 if not content:
                     continue
+                data_id = (row.get("data_id") or row.get("callid") or "").strip()
+                comment = (row.get("comment") or "").strip()
+                if not comment:
+                    label = (row.get("label") or "").strip()
+                    category = (row.get("category") or "").strip()
+                    if label and category:
+                        comment = f"{label}，{category}"
+                    else:
+                        comment = label or category
                 self.cases.append(
                     LabeledCase(
-                        data_id=(row.get("data_id") or "").strip(),
+                        data_id=data_id,
                         content=content,
-                        comment=(row.get("comment") or "").strip(),
+                        comment=comment,
                     )
                 )
         if self.cases:
@@ -77,8 +86,15 @@ class CaseStore:
                 break
         return out
 
-    def retrieve_with_scores(self, text: str, top_k: int = 3):
+    def retrieve_with_scores(self, text: str, top_k: int = 3, exclude_id: Optional[str] = None):
         if not self._built:
             return []
-        hits = self._index.search(text, top_k=top_k)
-        return [(self.cases[i], s) for i, s in hits]
+        hits = self._index.search(text, top_k=top_k + (1 if exclude_id else 0))
+        out = []
+        for i, s in hits:
+            if exclude_id and self.cases[i].data_id == exclude_id:
+                continue
+            out.append((self.cases[i], s))
+            if len(out) >= top_k:
+                break
+        return out

@@ -27,9 +27,17 @@ _VIOLATION_DEFAULT_RISK = {
 
 # 高危触发词：命中即把对应类目升级为高风险。
 _HIGH_RISK_TRIGGERS = {
-    "贷款相关": ["受托支付", "委托支付", "砍头息", "债务优化", "第三方代收", "到手", "解冻金"],
+    "贷款相关": ["砍头息", "债务优化", "解冻金", "操作提现", "提额降息", "关闭会员", "先提现", "把钱提现", "系统才能检测", "配合检测"],
+    "法律服务": ["帮退律所", "一半服务费", "律所费用"],
     "商品推销": [],
-    "违规催收": ["上门", "身份证", "户籍地", "通讯录"],
+    "违规催收": ["全网公开", "纪检", "公检法", "冒充", "法院人员", "司法调节站", "诉讼中心", "限制高消费"],
+}
+
+# 中风险触发词：命中即把对应类目升级为中风险（不覆盖已命中的高风险）。
+_MEDIUM_RISK_TRIGGERS = {
+    "贷款相关": ["公积金", "提取公积金", "清除数据"],
+    "商品推销": ["保健品", "灵芝", "原浆"],
+    "企业营销与招商服务": ["虚开", "成本票", "核定征收", "买票冲成本", "重点人群", "补贴申报"],
 }
 
 # 合规信号（个人微信、外呼人员主动添加 → 不应判为引流违规）。
@@ -41,9 +49,24 @@ _ACTIVE_ADD = re.compile(
     r"下载|点(击|一下).{0,3}链接|屏幕共享|会议软件|加(个|入).{0,3}群|福利群"
 )
 
+# 砍头息变体：『到手』后紧跟金额才升高风险，避免『钱到手了』等日常表述误触发。
+_KANTOUXI = re.compile(r"到手[一二两三四五六七八九十百千万\d]")
+
+# 最新口径：非银行渠道要求/询问芝麻或微信信用分 → 【手机租赁套路贷诈骗·涉诈】。
+_CREDIT_SCORE = re.compile(r"芝麻(信用)?分|微信信用分")
+
 
 def _count_hits(norm_text: str, keywords: List[str]) -> Tuple[int, List[str]]:
-    hit = [k for k in keywords if k and k in norm_text]
+    """大小写不敏感匹配（norm_text 需已 casefold）；同词不同大小写形态只计一次。"""
+    hit: List[str] = []
+    seen = set()
+    for k in keywords:
+        folded = k.casefold()
+        if not folded or folded in seen:
+            continue
+        seen.add(folded)
+        if folded in norm_text:
+            hit.append(k)
     return len(hit), hit
 
 
@@ -55,7 +78,7 @@ class HeuristicInspector:
 
     def inspect(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
         text = content or ""
-        norm = text.replace("\n", "")
+        norm = text.replace("\n", "").casefold()
 
         candidates: List[Tuple[RiskLevel, int, str, str, List[str], bool]] = []
         # (risk, score, category, subtype, features, is_fraud)
@@ -67,11 +90,22 @@ class HeuristicInspector:
             if n >= 2:
                 candidates.append((RiskLevel.HIGH, n, cat, "", hits, True))
 
+        # 非银行渠道要求/询问信用分 → 手机租赁套路贷（涉诈），单信号即成立。
+        credit_m = _CREDIT_SCORE.search(norm)
+        if credit_m and "银行" not in norm:
+            candidates.append(
+                (RiskLevel.HIGH, 2, "手机租赁套路贷诈骗", "", [credit_m.group(0)], True)
+            )
+
         # 违规场景。
         for sc in self.kb.rules.get("violation_scenarios", []):
             cat = sc.get("category", "")
             n, hits = _count_hits(norm, sc.get("keywords", []))
             if n < 1:
+                continue
+            # 『其他』默认即高风险，且关键词（紧急联系人/户籍地等）与催收共词，
+            # 单命中极易误报，要求至少 2 个命中。
+            if cat == "其他" and n < 2:
                 continue
             risk = _VIOLATION_DEFAULT_RISK.get(cat, RiskLevel.LOW)
             subtype = ""
@@ -80,13 +114,20 @@ class HeuristicInspector:
                 if _ACTIVE_ADD.search(norm):
                     risk = RiskLevel.HIGH
                     subtype = "引导用户主动添加/非个人微信"
-                elif _COMPLIANT_WECHAT.search(norm) and not _ACTIVE_ADD.search(norm):
+                elif _COMPLIANT_WECHAT.search(norm):
                     # 外呼人员主动添加个人微信 → 合规，不计入违规候选。
                     continue
+            if cat == "贷款相关" and _KANTOUXI.search(norm):
+                risk = RiskLevel.HIGH
             for trg in _HIGH_RISK_TRIGGERS.get(cat, []):
                 if trg in norm:
                     risk = RiskLevel.HIGH
                     break
+            if risk != RiskLevel.HIGH:
+                for trg in _MEDIUM_RISK_TRIGGERS.get(cat, []):
+                    if trg in norm and risk.rank < RiskLevel.MEDIUM.rank:
+                        risk = RiskLevel.MEDIUM
+                        break
 
             # 至少 2 个关键词命中或命中高危触发，才计为违规，降低误报。
             if n >= 2 or risk == RiskLevel.HIGH:

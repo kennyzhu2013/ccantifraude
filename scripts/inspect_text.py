@@ -23,6 +23,8 @@ def main() -> int:
     parser.add_argument("--file", "-f", help="从文件读取通话文本")
     parser.add_argument("--data-id", help="数据ID（可选）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
+    parser.add_argument("--tools", action="store_true", help="使用完整 agentic tool loop（更慢更准）")
+    parser.add_argument("--fast", action="store_true", help="使用快速检索增强单轮模式")
     parser.add_argument("--verbose", "-v", action="store_true", help="打印工具调用过程")
     args = parser.parse_args()
 
@@ -39,13 +41,15 @@ def main() -> int:
         return 2
 
     agent = QcAgent(verbose=args.verbose)
-    result = agent.inspect(content, data_id=args.data_id)
+    use_tools = True if args.tools else (False if args.fast else None)
+    result = agent.inspect(content, data_id=args.data_id, use_tools=use_tools)
 
     if args.json:
         print(result.to_json())
         return 0
 
-    print(f"质检模式：{agent.mode}（llm 需配置 LLM_API_KEY，否则启发式回退）")
+    effective = "tools" if (use_tools or (use_tools is None and agent.config.use_tools)) else "fast"
+    print(f"质检模式：{agent.mode}/{effective}（llm 需配置 LLM_API_KEY，否则启发式回退）")
     print("=" * 60)
     print(f"复核标签：{result.label}")
     print(f"是否违规：{'是' if result.is_violation else '否'}    是否涉诈：{'是' if result.is_fraud else '否'}")

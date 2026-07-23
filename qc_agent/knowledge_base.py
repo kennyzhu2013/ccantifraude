@@ -71,24 +71,55 @@ def _parse_markdown_sections(md_text: str) -> List[SpecSection]:
     return [s for s in sections if s.title]
 
 
+def _disambig_title(entry: str) -> str:
+    """提取消歧条目短标题，作为 system prompt 常驻索引（正文按需注入）。"""
+    if entry.startswith("【"):
+        end = entry.find("】")
+        if end > 0:
+            return entry[: end + 1]
+    head = entry.split("：", 1)[0]
+    return head if len(head) <= 40 else head[:40] + "…"
+
+
 class KnowledgeBase:
-    def __init__(self, spec_path: Path, rules_path: Path):
+    def __init__(
+        self,
+        spec_path: Path,
+        rules_path: Path,
+        extra_spec_paths: Optional[List[Path]] = None,
+    ):
         self.spec_path = Path(spec_path)
         self.rules_path = Path(rules_path)
+        self.extra_spec_paths = [Path(p) for p in (extra_spec_paths or [])]
         self.sections: List[SpecSection] = []
         self.rules: Dict[str, Any] = {}
         self._index = TfidfIndex()
+        self._disambig_index = TfidfIndex()
         self._load()
 
     # ---------- 加载 ----------
     def _load(self) -> None:
-        if self.spec_path.exists():
-            md = self.spec_path.read_text(encoding="utf-8")
-            self.sections = _parse_markdown_sections(md)
-            corpus = [f"{s.full_title}\n{s.content}" for s in self.sections]
-            if corpus:
-                self._index.fit(corpus)
+        self.sections = []
+        paths = [self.spec_path] + self.extra_spec_paths
+        for path in paths:
+            if not path.exists():
+                continue
+            md = path.read_text(encoding="utf-8")
+            parsed = _parse_markdown_sections(md)
+            # 额外规范文件加前缀，避免与 V1.1 同名小节冲突。
+            if path != self.spec_path:
+                prefix = path.stem
+                for s in parsed:
+                    s.path = [prefix] + list(s.path)
+            self.sections.extend(parsed)
+        corpus = [f"{s.full_title}\n{s.content}" for s in self.sections]
+        if corpus:
+            self._index.fit(corpus)
         self.rules = self.load_rules()
+        # 消歧规则单独建索引：正文不再全量常驻 prompt，而是按通话文本检索命中后注入。
+        disambig = self.rules.get("disambiguation", [])
+        if disambig:
+            self._disambig_index.fit(disambig)
 
     def load_rules(self) -> Dict[str, Any]:
         if self.rules_path.exists():
@@ -107,6 +138,14 @@ class KnowledgeBase:
         hits = self._index.search(query, top_k=top_k)
         return [self.sections[i] for i, _ in hits]
 
+    def relevant_disambiguation(self, text: str, top_k: int = 6) -> List[str]:
+        """检索与通话文本最相关的消歧规则全文（分层注入的『按需加载』部分）。"""
+        entries = list(self.rules.get("disambiguation", []))
+        if not entries or not (text or "").strip():
+            return []
+        hits = self._disambig_index.search(text, top_k=top_k)
+        return [entries[i] for i, _ in hits]
+
     def list_scenarios(self) -> Dict[str, List[str]]:
         return {
             "违规场景": [s.get("category", "") for s in self.rules.get("violation_scenarios", [])],
@@ -118,6 +157,8 @@ class KnowledgeBase:
             for sc in self.rules.get(bucket, []):
                 if sc.get("category") == category:
                     out = dict(sc)
+                    # 演进暂存区未经人工审核，不暴露给 LLM 工具/启发式消费。
+                    out.pop("candidate_keywords", None)
                     out["_bucket"] = bucket
                     return out
         return None
@@ -143,6 +184,26 @@ class KnowledgeBase:
         lines.append("【涉诈场景（均为高风险，需标注为诈骗）】")
         for sc in self.rules.get("fraud_scenarios", []):
             lines.append(f"- {sc.get('category')}：{sc.get('judgment_method', '')}")
+        table = self.rules.get("business_decision_table", [])
+        if table:
+            lines.append("【业务口径判定表（最高优先级，命中即按此输出 category/subtype/risk_level）】")
+            for row in table:
+                sub = row.get("subtype") or "-"
+                line = (
+                    f"- {row.get('场景')} => {row.get('判定')}｜category={row.get('category')}"
+                    f"｜subtype={sub}｜risk_level={row.get('risk_level')}"
+                )
+                note = row.get("备注")
+                if note:
+                    line += f"｜备注：{note}"
+                lines.append(line)
+        disambig = self.rules.get("disambiguation", [])
+        if disambig:
+            lines.append(
+                "【易混场景子类目判别索引（仅列标题；与当前通话相关条目的全文会随待检文本一并给出，先按其消歧再定类目）】"
+            )
+            for d in disambig:
+                lines.append(f"- {_disambig_title(d)}")
         evolved = self.rules.get("evolved_examples", [])
         if evolved:
             lines.append("【已自动演进沉淀的边缘案例（错题本）】")
