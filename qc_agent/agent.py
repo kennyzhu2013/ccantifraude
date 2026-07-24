@@ -342,4 +342,19 @@ class QcAgent:
             res.is_violation = True
         if res.risk_level.rank > 0:
             res.is_violation = True
+        # 类目归一化：模型偶发把真实类目落在 subtype，主类目写成泛化词
+        # （如『诈骗』）或错误大类（如涉诈结论主类目写『其他』）——提升 subtype。
+        sub = (res.scene_subtype or "").strip().strip("-/")
+        violation_cats = {
+            s.get("category") for s in self.kb.rules.get("violation_scenarios", [])
+        }
+        fraud_cats = {
+            s.get("category") for s in self.kb.rules.get("fraud_scenarios", [])
+        }
+        generic = {"诈骗", "涉诈", "违规", "违规场景", "涉诈类型"}
+        if sub in violation_cats | fraud_cats:
+            if res.scene_category in generic or (
+                res.is_fraud and res.scene_category not in fraud_cats and sub in fraud_cats
+            ):
+                res.scene_category, res.scene_subtype = sub, ""
         return res

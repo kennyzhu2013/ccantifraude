@@ -113,8 +113,14 @@ def main() -> int:
             res = InspectionResult.from_dict(base.to_dict())
             res.data_id = case.data_id
             res.source = base.source + "(dedup)"
-        acceptable = normalize_label(case.comment)
-        exp_fraud = expected_is_fraud(case.comment)
+        # 人工标签明确为正常/合规时，违规判定已由 TP/TN 统计覆盖，
+        # 不再参与类目/涉诈准确率（否则『正常，对本人催收』会因关键词
+        # 『催收』被归一化出可接受类目，制造伪冲突）。
+        if is_compliant_label(case.comment):
+            acceptable, exp_fraud = set(), None
+        else:
+            acceptable = normalize_label(case.comment)
+            exp_fraud = expected_is_fraud(case.comment)
         rows.append(
             {
                 "data_id": case.data_id,

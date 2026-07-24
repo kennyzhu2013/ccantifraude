@@ -78,4 +78,10 @@ def build_fast_user_message(
     if similar_block:
         parts.append("【最相似的人工历史判例（few-shot，对齐人工口径，仅供参考勿照抄）】\n" + similar_block)
     parts.append("【待质检通话转写文本】\n" + content)
+    parts.append(
+        "【重要】你的结论必须且只能针对上方【待质检通话转写文本】的内容本身：\n"
+        "1. 相似判例与规范小节仅用于对齐判定口径；若判例讲的是另一类场景（如判例是证券引流、"
+        "待质检文本是航班改签），严禁把判例的类目/结论套到待质检文本上。\n"
+        "2. evidence_quotes 必须是待质检文本中的原文片段，禁止引用判例或规范中的话术。"
+    )
     return "\n\n".join(parts)
