@@ -40,9 +40,30 @@ class CaseStore:
         if self.csv_path.exists():
             self.load()
 
+    @staticmethod
+    def _open_csv(path: Path):
+        """按常见编码尝试打开 CSV（utf-8-sig / gbk / gb18030）。"""
+        last_err: Optional[Exception] = None
+        for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+            f = None
+            try:
+                f = path.open("r", encoding=enc, newline="")
+                # 提前读一行验证编码，避免读到一半才爆。
+                pos = f.tell()
+                f.readline()
+                f.seek(pos)
+                return f
+            except UnicodeDecodeError as exc:
+                last_err = exc
+                if f is not None:
+                    f.close()
+        raise UnicodeDecodeError(
+            "unknown", b"", 0, 1, f"无法解码 {path}（已尝试 utf-8/gbk）：{last_err}"
+        )
+
     def load(self) -> "CaseStore":
         self.cases = []
-        with self.csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        with self._open_csv(self.csv_path) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 content = (row.get("content") or "").strip()
