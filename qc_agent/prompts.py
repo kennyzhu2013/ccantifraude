@@ -21,6 +21,14 @@ _WORKFLOW = """工作流程（你可自主决定调用以下工具，不必全�
 - web_search_fraud：（如可用）核查公众号/小程序主体、IP归属或搜索套路分享。
 完成调查后，停止调用工具，仅输出一个 JSON 对象作为最终结论。"""
 
+_WORKFLOW_SKILLS = """工作流程（你可自主决定调用以下工具，不必全部调用）：
+- load_skill：按技能目录加载某场景类目的完整判定规则（判断方法/风险规则/消歧/错题本），
+  判定前应优先加载 1-3 个与通话最相关的技能。
+- search_spec：检索规范原文小节与典型话术，支撑你的判断依据。
+- retrieve_similar_cases：召回最相似的人工历史判例，对齐人工口径（重要）。
+- web_search_fraud：（如可用）核查公众号/小程序主体、IP归属或搜索套路分享。
+完成调查后，停止调用工具，仅输出一个 JSON 对象作为最终结论。"""
+
 _OUTPUT = """最终输出要求：仅输出一个 JSON 对象（不要包裹代码块、不要多余文字），字段如下：
 {
   "is_violation": true/false,        // 是否违规（含涉诈）。正常场景为 false
@@ -46,31 +54,53 @@ _JSON_FORCE = """请立即停止调用工具，根据已有信息输出最终 JS
 
 
 def build_system_prompt(kb: KnowledgeBase) -> str:
-    sections = [
-        _ROLE,
-        _PRINCIPLE,
-        "【知识库规则总览（详情可用工具按需展开）】\n" + kb.rules_brief(),
-        _WORKFLOW,
-        _OUTPUT,
-    ]
+    """工具模式 system prompt。skills 可用时用瘦身版（目录常驻+load_skill 按需加载）。"""
+    if kb.skills_available:
+        sections = [
+            _ROLE,
+            _PRINCIPLE,
+            "【判定知识总览】\n" + kb.slim_brief(),
+            _WORKFLOW_SKILLS,
+            _OUTPUT,
+        ]
+    else:
+        sections = [
+            _ROLE,
+            _PRINCIPLE,
+            "【知识库规则总览（详情可用工具按需展开）】\n" + kb.rules_brief(),
+            _WORKFLOW,
+            _OUTPUT,
+        ]
     return "\n\n".join(sections)
 
 
 def build_system_prompt_fast(kb: KnowledgeBase) -> str:
-    """快速模式（检索增强单轮）：不暴露工具，相关知识在 user 消息中直接给出。"""
-    sections = [
-        _ROLE,
-        _PRINCIPLE,
-        "【知识库规则总览】\n" + kb.rules_brief(),
-        _OUTPUT,
-    ]
+    """快速模式（检索增强单轮）：不暴露工具，相关知识在 user 消息中直接给出。
+
+    skills 可用时 system prompt 仅常驻全局不变量与技能目录（短且字节稳定，
+    利于前缀缓存），命中技能的完整细则由 harness 路由后随 user 消息注入。
+    """
+    brief = (
+        "【判定知识总览】\n" + kb.slim_brief()
+        if kb.skills_available
+        else "【知识库规则总览】\n" + kb.rules_brief()
+    )
+    sections = [_ROLE, _PRINCIPLE, brief, _OUTPUT]
     return "\n\n".join(sections)
 
 
 def build_fast_user_message(
-    content, similar_block: str, spec_block: str, disambig_block: str = ""
+    content,
+    similar_block: str,
+    spec_block: str,
+    disambig_block: str = "",
+    skills_block: str = "",
 ) -> str:
     parts = ["请对以下通话转写文本进行反诈质检，直接输出 JSON 结论（不要调用工具、不要多余文字）。"]
+    if skills_block:
+        parts.append(
+            "【与本通话最相关的场景判定技能（完整细则，判定类目与风险等级以此为准）】\n" + skills_block
+        )
     if disambig_block:
         parts.append("【与本通话相关的易混场景消歧规则（重要，先按此消歧再定类目）】\n" + disambig_block)
     if spec_block:

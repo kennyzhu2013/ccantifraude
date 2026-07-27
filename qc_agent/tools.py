@@ -28,6 +28,7 @@ class ToolRegistry:
             "search_spec": self._search_spec,
             "list_scenarios": self._list_scenarios,
             "get_scenario": self._get_scenario,
+            "load_skill": self._load_skill,
             "retrieve_similar_cases": self._retrieve_similar_cases,
             "web_search_fraud": self._web_search_fraud,
         }
@@ -52,6 +53,15 @@ class ToolRegistry:
             avail = self.kb.list_scenarios()
             return f"未找到场景『{category}』。可选场景：{json.dumps(avail, ensure_ascii=False)}"
         return json.dumps(sc, ensure_ascii=False, indent=2)
+
+    def _load_skill(self, name: str) -> str:
+        if not self.kb.skills_available:
+            return "技能库未启用，请改用 get_scenario 获取场景规则。"
+        skill = self.kb.skills.get(name)
+        if skill is None:
+            names = "、".join(s.name for s in self.kb.skills.skills)
+            return f"未找到技能『{name}』。可选技能：{names}"
+        return f"### 技能：{skill.name}（{skill.bucket}·{skill.risk}）\n{skill.body}"
 
     def _retrieve_similar_cases(
         self, text: str, top_k: Optional[int] = None, exclude_id: Optional[str] = None
@@ -130,6 +140,20 @@ class ToolRegistry:
                             "category": {"type": "string", "description": "场景类目名，如『引流第三方平台』『证券投资类』"}
                         },
                         "required": ["category"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "load_skill",
+                    "description": "加载某场景类目的完整判定技能（判断方法、风险等级规则、业务口径判定、易混消歧、错题本）。判定前应优先加载系统提示技能目录中与通话最相关的 1-3 个技能。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "技能名（即场景类目名），如『手机租赁套路贷诈骗』"}
+                        },
+                        "required": ["name"],
                     },
                 },
             },

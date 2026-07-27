@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .retrieval import TfidfIndex
+from .skills import SkillLibrary
 
 
 @dataclass
@@ -87,6 +88,7 @@ class KnowledgeBase:
         spec_path: Path,
         rules_path: Path,
         extra_spec_paths: Optional[List[Path]] = None,
+        skills_dir: Optional[Path] = None,
     ):
         self.spec_path = Path(spec_path)
         self.rules_path = Path(rules_path)
@@ -95,7 +97,14 @@ class KnowledgeBase:
         self.rules: Dict[str, Any] = {}
         self._index = TfidfIndex()
         self._disambig_index = TfidfIndex()
+        self.skills: Optional[SkillLibrary] = (
+            SkillLibrary(skills_dir) if skills_dir else None
+        )
         self._load()
+
+    @property
+    def skills_available(self) -> bool:
+        return self.skills is not None and self.skills.available
 
     # ---------- 加载 ----------
     def _load(self) -> None:
@@ -170,6 +179,44 @@ class KnowledgeBase:
             for sc in self.rules.get(bucket, []):
                 out[sc.get("category", "")] = list(sc.get("keywords", []))
         return out
+
+    def slim_brief(self) -> str:
+        """skills 模式的 system prompt 常驻部分：全局不变量 + 技能目录。
+
+        场景细则（判断方法/风险规则/类目内消歧）不再全量常驻，由技能路由按需注入；
+        业务口径判定表含大量『合规』行（正常场景守门），保持全局常驻。
+        """
+        lines: List[str] = []
+        lines.append(f"判定原则：{self.rules.get('principle', '')}")
+        lines.append(f"输出契约：{self.rules.get('output_contract', '')}")
+        table = self.rules.get("business_decision_table", [])
+        if table:
+            lines.append("【业务口径判定表（最高优先级，命中即按此输出 category/subtype/risk_level）】")
+            for row in table:
+                sub = row.get("subtype") or "-"
+                line = (
+                    f"- {row.get('场景')} => {row.get('判定')}｜category={row.get('category')}"
+                    f"｜subtype={sub}｜risk_level={row.get('risk_level')}"
+                )
+                if row.get("备注"):
+                    line += f"｜备注：{row['备注']}"
+                lines.append(line)
+        if self.skills_available:
+            lines.append(
+                "【场景技能目录（17 个判定技能；与本通话相关技能的完整判定规则会随待检文本注入，"
+                "以注入的技能细则为准定类目与风险等级）】"
+            )
+            lines.append(self.skills.catalog())
+        # 未归属任何技能的跨域消歧规则保持全局常驻（技能内已含各自类目的消歧）。
+        skill_names = {s.name for s in self.skills.skills} if self.skills_available else set()
+        orphan = [
+            d for d in self.rules.get("disambiguation", [])
+            if not any(name in d for name in skill_names)
+        ]
+        if orphan:
+            lines.append("【通用消歧规则】")
+            lines.extend(f"- {d}" for d in orphan)
+        return "\n".join(lines)
 
     def rules_brief(self) -> str:
         """生成注入 system prompt 的精简规则摘要（按需加载的『总览索引』）。"""

@@ -368,6 +368,46 @@ python3 scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache 
 注意：spec 典型话术子集上的「类目冲突」多数是 V1.1 旧标签未跟进新规范（如旧标『贷款相关』的
 受托支付案例，新规范应判『贷款相关-ab贷·涉诈』），属正确升级而非误判。
 
+## 11. 场景技能库 + 证据校验 + 升级信号
+
+### 场景技能库（Agent Skills / 渐进式披露）
+
+17 个场景类目各自成为一个技能文件（`knowledge/skills/*.md`，由
+`scripts/build_skills.py` 从 `rules.json` 生成，幂等、错题本区保留）：
+
+- **system prompt 只常驻技能目录**（每技能一行触发词+描述）与全局不变量
+  （就高不就低、输出契约、业务口径判定表），fast/tool 模式 prompt 均缩减约 37%，
+  且字节稳定利于 LLM 前缀缓存；
+- **fast 模式**：harness 按通话内容路由 top-k 技能（触发词命中 + TF-IDF），
+  完整判定细则（判断方法/风险规则/类目内消歧/错题本）随待检文本注入；
+- **tool 模式**：新增 `load_skill` 工具，模型按目录自主加载相关技能；
+- **演进定向落盘**：反射 Agent 的错题写入对应技能文件的错题本区
+  （errata 标记之间），只有该类目被路由命中时才进入上下文，不污染无关场景；
+- 配置：`QC_USE_SKILLS`（默认 true）、`QC_SKILLS_TOP_K`（默认 3）、`QC_SKILLS_DIR`。
+  技能目录缺失时自动回退全量 `rules_brief` 注入，行为与旧版一致。
+
+### 证据校验（`qc_agent/verify.py`）
+
+违规/涉诈结论的 `evidence_quotes` 会被程序化校验是否真的出现在待检原文中
+（归一化子串 + 长引用分块匹配，对 ASR 标点差异鲁棒）。全部未命中时标记
+`evidence_verified=false`——这是『few-shot 照抄』失效模式（把判例当原文下结论）
+的确定性拦截，比 prompt 告诫可靠。
+
+### 升级信号（替代失真的置信度阈值）
+
+实测 LLM 置信度饱和在 0.95-1.0，`QC_ESCALATE_BELOW_CONFIDENCE` 区分度差。
+现在 fast 模式命中以下任一**确定性信号**即自动升级 tool loop 复核
+（`QC_ESCALATE_ON_SIGNALS`，默认 true）：
+
+1. 证据校验失败（违规结论但引用未在原文命中）；
+2. 启发式命中涉诈关键词但 LLM 判正常（潜在漏判）；
+3. 输出经 JSON 修复/启发式兜底（可靠性存疑）。
+
+升级后的结论带 `[升级复核触发原因]` 标注，源标记为 `llm-escalated`。
+
+回归：`data/eval_fresh_cases.csv` 28 条在 skills 模式下违规检出 R=1.000/P=1.000、
+类目 21/21、涉诈 10/10；离线单测 70/70。
+
 ## TODO：（人工添加的）
 1. web_search改成另一个案例发现agent的收集网上信息结果，或者直接让将网上几十个网站的诈骗案例都收集到一个文件中喂给AI，让AI自己去分析，看是否有新的发现，如果有，就更新规则。
 2. `--apply`（自治演进）另外接入额外的高端模型，比如 GPT-5，看是否能有更好的效果。

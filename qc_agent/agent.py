@@ -32,6 +32,7 @@ from .prompts import (
 )
 from .schema import InspectionResult, RiskLevel
 from .tools import ToolRegistry
+from .verify import verify_evidence
 
 
 def _truncate(content: str, max_chars: int) -> str:
@@ -131,6 +132,7 @@ class QcAgent:
         self.kb = kb or KnowledgeBase(
             self.config.spec_path,
             self.config.rules_path,
+            skills_dir=self.config.skills_dir if self.config.use_skills else None,
         )
         self.cases = cases if cases is not None else CaseStore(self.config.cases_path)
         self.llm = LLMClient(self.config)
@@ -141,8 +143,11 @@ class QcAgent:
         self.verbose = verbose
         self.cache: Optional[ResultCache] = None
         if self.config.cache_path:
-            # 知识指纹纳入缓存命名空间：rules/规则/判定表变更后旧缓存自动失效，避免陈旧结论。
-            kb_fp = hashlib.sha1(self.kb.rules_brief().encode("utf-8")).hexdigest()[:10]
+            # 知识指纹纳入缓存命名空间：rules/技能变更后旧缓存自动失效，避免陈旧结论。
+            fp_src = self.kb.rules_brief()
+            if self.kb.skills_available:
+                fp_src += self.kb.skills.digest()
+            kb_fp = hashlib.sha1(fp_src.encode("utf-8")).hexdigest()[:10]
             self.cache = ResultCache(
                 Path(self.config.cache_path), self.config.llm_model, f"{self.mode}:{kb_fp}"
             )
@@ -179,12 +184,15 @@ class QcAgent:
                 res = self._inspect_with_llm(content, data_id=data_id)
             else:
                 res = self._inspect_fast(content, data_id=data_id)
-                # 两阶段：快速模式低置信度时升级到完整工具回路复核。
-                threshold = self.config.escalate_below_confidence
-                if threshold > 0 and 0 < res.confidence < threshold:
+                reason = self._escalation_reason(res, content)
+                if reason:
                     if self.verbose:
-                        print(f"[escalate] 置信度 {res.confidence:.2f} < {threshold}，升级工具模式复核")
+                        print(f"[escalate] {reason}，升级工具模式复核")
                     res = self._inspect_with_llm(content, data_id=data_id)
+                    res.source = "llm-escalated"
+                    res.analysis_thought = (
+                        f"[升级复核触发原因] {reason}\n" + res.analysis_thought
+                    ).strip()
         except Exception as exc:  # pragma: no cover - LLM 调用失败时兜底
             if self.verbose:
                 print(f"[warn] LLM 质检失败，回退启发式：{exc}")
@@ -196,11 +204,49 @@ class QcAgent:
             self.cache.set(cache_ns + "\n" + content, res.to_dict())
         return res
 
+    # ---------- 升级信号 ----------
+    def _escalation_reason(self, res: InspectionResult, content: str) -> str:
+        """快速模式结论的可疑信号：命中任一即升级到工具回路复核。
+
+        实测 confidence 饱和在 0.95-1.0，置信度阈值区分度差；改用确定性信号：
+        ① 证据校验失败（违规/涉诈结论但引用未在原文命中，few-shot 照抄的特征）；
+        ② 启发式命中涉诈关键词但 LLM 判正常（潜在漏判）；
+        ③ 输出经 JSON 修复或启发式兜底（结论可靠性存疑）。
+        """
+        signals = []
+        if self.config.escalate_on_signals:
+            if res.evidence_verified is False:
+                signals.append("违规结论的证据引用未在原文命中")
+            if not res.is_violation:
+                heur = self.heuristic.inspect(content)
+                if heur.is_fraud:
+                    signals.append(
+                        f"启发式命中涉诈关键词（{heur.scene_category}）但LLM判正常"
+                    )
+            if res.source.endswith("-repair") or res.source == "llm+heuristic":
+                signals.append("输出经JSON修复/兜底")
+        threshold = self.config.escalate_below_confidence
+        if threshold > 0 and 0 < res.confidence < threshold:
+            signals.append(f"置信度{res.confidence:.2f}低于阈值{threshold}")
+        return "；".join(signals)
+
     # ---------- 快速模式：检索增强单轮 ----------
     def _disambig_block(self, clipped: str) -> str:
         """分层注入：system prompt 只常驻消歧标题索引，命中的正文随待检文本给出。"""
         entries = self.kb.relevant_disambiguation(clipped, top_k=self.config.disambig_top_k)
         return "\n".join(f"- {e}" for e in entries)
+
+    def _skills_block(self, clipped: str) -> str:
+        """技能路由：按通话内容选 top-k 场景技能，注入完整判定细则。"""
+        if not self.kb.skills_available:
+            return ""
+        routed = self.kb.skills.route(clipped, top_k=self.config.skills_top_k)
+        if not routed:
+            return ""
+        if self.verbose:
+            names = ", ".join(f"{s.name}({sc:.1f})" for s, sc in routed)
+            print(f"[skills] 路由命中: {names}")
+        return self.kb.skills.render([s for s, _ in routed])
 
     def _inspect_fast(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
         clipped = _truncate(content, self.config.max_content_chars)
@@ -211,12 +257,15 @@ class QcAgent:
         spec_block = self.tools.dispatch(
             "search_spec", {"query": clipped[:300], "top_k": 3}
         )
+        skills_block = self._skills_block(clipped)
+        # 技能已内嵌各自类目的消歧规则，启用技能时只补充未随技能注入的部分。
+        disambig_block = "" if skills_block else self._disambig_block(clipped)
         messages = [
             {"role": "system", "content": build_system_prompt_fast(self.kb)},
             {
                 "role": "user",
                 "content": build_fast_user_message(
-                    clipped, similar_block, spec_block, self._disambig_block(clipped)
+                    clipped, similar_block, spec_block, disambig_block, skills_block
                 ),
             },
         ]
@@ -357,4 +406,15 @@ class QcAgent:
                 res.is_fraud and res.scene_category not in fraud_cats and sub in fraud_cats
             ):
                 res.scene_category, res.scene_subtype = sub, ""
+        # 证据校验：违规/涉诈结论的引用必须能在待检原文中命中（拦截 few-shot 照抄）。
+        if res.is_violation and res.evidence_quotes:
+            ratio, missing = verify_evidence(res.evidence_quotes, content)
+            res.evidence_verified = ratio > 0
+            if not res.evidence_verified:
+                res.analysis_thought = (
+                    "[证据校验失败] evidence_quotes 均未在待检原文中命中，"
+                    "结论可能照抄了相似判例/规范话术，需人工留意。\n" + res.analysis_thought
+                ).strip()
+                if self.verbose:
+                    print(f"[verify] 证据未命中原文: {missing[:2]}")
         return res

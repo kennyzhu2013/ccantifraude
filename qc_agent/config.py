@@ -80,6 +80,25 @@ class Config:
     # 结果缓存路径（按内容哈希）。空字符串=禁用。降本：避免重复/重跑 LLM 调用。
     cache_path: str = field(default_factory=lambda: os.getenv("QC_CACHE_PATH", ""))
 
+    # 升级信号：证据校验失败/启发式涉诈冲突/JSON修复兜底时，自动升级 tool loop 复核。
+    escalate_on_signals: bool = field(
+        default_factory=lambda: os.getenv("QC_ESCALATE_ON_SIGNALS", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+
+    # ---- 场景技能库（渐进式披露）----
+    skills_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("QC_SKILLS_DIR", str(PROJECT_ROOT / "knowledge" / "skills"))
+        )
+    )
+    # skills 目录存在且非空时启用；false 回退到全量 rules_brief 注入。
+    use_skills: bool = field(
+        default_factory=lambda: os.getenv("QC_USE_SKILLS", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    skills_top_k: int = field(default_factory=lambda: int(os.getenv("QC_SKILLS_TOP_K", "3")))
+
     # ---- 知识与数据路径 ----
     spec_path: Path = field(default_factory=lambda: PROJECT_ROOT / "knowledge" / "spec.md")
     rules_path: Path = field(default_factory=lambda: PROJECT_ROOT / "knowledge" / "rules.json")
