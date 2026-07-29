@@ -137,6 +137,7 @@ def main() -> int:
                 "fraud_correct": "" if exp_fraud is None else (res.is_fraud == exp_fraud),
                 "explanation": res.explanation,
                 "confidence": round(res.confidence, 3),
+                "review_flags": "；".join(res.review_flags),
                 "source": res.source,
             }
         )

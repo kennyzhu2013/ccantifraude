@@ -393,17 +393,35 @@ python3 scripts/evolve.py --csv data/real_cases.csv --out conflicts.csv --cache 
 `evidence_verified=false`——这是『few-shot 照抄』失效模式（把判例当原文下结论）
 的确定性拦截，比 prompt 告诫可靠。
 
-### 升级信号（替代失真的置信度阈值）
+### 不确定性信号与质量门控（替代失真的置信度阈值）
 
-实测 LLM 置信度饱和在 0.95-1.0，`QC_ESCALATE_BELOW_CONFIDENCE` 区分度差。
-现在 fast 模式命中以下任一**确定性信号**即自动升级 tool loop 复核
-（`QC_ESCALATE_ON_SIGNALS`，默认 true）：
+为什么不用置信度？三条路都做过实验，结论如下：
+
+| 方法 | 实测结果 |
+|---|---|
+| 自报 confidence（含标尺锚定 prompt） | 饱和在 0.95-1.0，灰区话术照样给 0.95，不可救药 |
+| 终答 token logprob（P(True) 探针） | 推理模型把不确定性坍缩——『抛硬币是否正面』都给 P=1.0，死路 |
+| K=3 重采样一致率 | 大多饱和，但能抓住真正无法判定的灰区（且 temp=0 结论本身会轮次间翻转），适合**选择性**使用 |
+
+因此不确定性来自**独立视角的旁证**，分两级门控（`QC_ESCALATE_ON_SIGNALS` 默认 true）：
+
+**硬信号 → 直接升级 tool loop 复核：**
 
 1. 证据校验失败（违规结论但引用未在原文命中）；
 2. 启发式命中涉诈关键词但 LLM 判正常（潜在漏判）；
 3. 输出经 JSON 修复/启发式兜底（可靠性存疑）。
 
-升级后的结论带 `[升级复核触发原因]` 标注，源标记为 `llm-escalated`。
+**软信号 → 先做自一致性采样（额外 K-1 次 temp>0 快速调用，`QC_SELF_CONSISTENCY_K` 默认 2），
+采样结论不一致才升级；一致则保留结论并标记『已复核通过』：**
+
+4. kNN 判例冲突：高相似历史判例的人工标签与结论方向相反（`QC_KNN_SIGNAL_MIN_SIM`）；
+5. 涉诈路由冲突：判正常但内容路由 top-1 为涉诈技能且分数过阈（`QC_ROUTE_FRAUD_SIGNAL_MIN`，
+   针对 ab贷要素若隐若现等灰区漏判的实测特征）；
+6. 自报置信度低于软阈值（`QC_SOFT_CONFIDENCE_BELOW`，弱信号兜底）。
+
+所有触发的信号写入结果的 `review_flags` 字段（batch_eval 输出列），供人工复核队列筛选；
+升级结论源标记 `llm-escalated`。fresh-28 实测：1 例硬信号升级 + 2 例软信号采样复核通过，
+额外开销约 11%，指标保持全满分。
 
 回归：`data/eval_fresh_cases.csv` 28 条在 skills 模式下违规检出 R=1.000/P=1.000、
 类目 21/21、涉诈 10/10；离线单测 70/70。

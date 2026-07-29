@@ -460,6 +460,79 @@ class TestEscalationSignals(unittest.TestCase):
         )
         self.assertEqual(agent._escalation_reason(res, "x"), "")
 
+    def test_verdict_key_normalizes_category_punctuation(self):
+        """『机票退、改签诈骗』与『机票退改签诈骗』应视为同一结论（采样一致性比较）。"""
+        from qc_agent.agent import _verdict_key
+
+        a = InspectionResult(is_violation=True, is_fraud=True,
+                             risk_level=RiskLevel.HIGH, scene_category="机票退、改签诈骗")
+        b = InspectionResult(is_violation=True, is_fraud=True,
+                             risk_level=RiskLevel.HIGH, scene_category="机票退改签诈骗")
+        self.assertEqual(_verdict_key(a), _verdict_key(b))
+
+    def test_knn_conflict_neighbors_fraud_but_llm_normal(self):
+        """高相似判例均为涉诈而 LLM 判正常时，应产生软信号。"""
+        import tempfile, shutil, csv as _csv
+
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            p = tmp / "cases.csv"
+            with p.open("w", encoding="utf-8-sig", newline="") as f:
+                w = _csv.DictWriter(f, fieldnames=["data_id", "content", "comment"])
+                w.writeheader()
+                for i in range(3):
+                    w.writerow({
+                        "data_id": f"k{i}",
+                        "content": "我是投顾客服，加入官方福利群，关注官方接待员服务号领取牛股名单",
+                        "comment": "证券投资类，涉诈",
+                    })
+            cfg = _offline_config()
+            cfg.cases_path = p
+            agent = QcAgent(config=cfg, cases=CaseStore(p))
+            res = InspectionResult(is_violation=False, scene_category="正常", source="llm-fast")
+            sig = agent._knn_conflict(
+                res, "我是投顾客服，加入官方福利群，关注官方接待员服务号领取牛股名单"
+            )
+            self.assertIn("均为涉诈但当前判正常", sig)
+            # 结论同向（涉诈）时不应报冲突。
+            res2 = InspectionResult(is_violation=True, is_fraud=True,
+                                    risk_level=RiskLevel.HIGH, scene_category="证券投资类")
+            self.assertEqual(agent._knn_conflict(
+                res2, "我是投顾客服，加入官方福利群，关注官方接待员服务号领取牛股名单"), "")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_soft_signal_low_confidence(self):
+        res = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW,
+                               scene_category="贷款相关", confidence=0.7, source="llm-fast")
+        soft = self.agent._soft_signals(res, "left:一段普通贷款推销话术")
+        self.assertTrue(any("自报置信度" in s for s in soft))
+        res.confidence = 0.97
+        soft2 = self.agent._soft_signals(res, "left:一段普通贷款推销话术")
+        self.assertFalse(any("自报置信度" in s for s in soft2))
+
+    def test_route_fraud_conflict_signal(self):
+        """判正常但内容路由到涉诈技能且分数过阈，应产生软信号；正常内容不应误触。"""
+        normal_verdict = InspectionResult(is_violation=False, scene_category="正常")
+        gray = (
+            "哥，装修贷这个事情，银行那边要求资金要有个走向说明，"
+            "可能需要您家里人配合签个字，具体流程到时候看银行安排。"
+        )
+        sig = self.agent._route_fraud_conflict(normal_verdict, gray)
+        self.assertIn("涉诈技能", sig)
+        benign = "您好，您的快递到小区驿站了，取件码八八二一，晚上九点前来取。"
+        self.assertEqual(self.agent._route_fraud_conflict(normal_verdict, benign), "")
+        # 已判违规的结论不需要该信号。
+        vio = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW, scene_category="贷款相关")
+        self.assertEqual(self.agent._route_fraud_conflict(vio, gray), "")
+
+    def test_review_flags_round_trip(self):
+        res = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW,
+                               scene_category="贷款相关", review_flags=["测试信号"])
+        d = res.to_dict()
+        self.assertEqual(d["review_flags"], ["测试信号"])
+        self.assertEqual(InspectionResult.from_dict(d).review_flags, ["测试信号"])
+
 
 class TestSchema(unittest.TestCase):
     def test_round_trip(self):

@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from .knowledge_base import KnowledgeBase
 
+# prompt 语义变更时递增：纳入结果缓存命名空间，避免旧 prompt 的结论被复用。
+PROMPT_VERSION = "v2"
+
 _ROLE = """你是【重庆行业卡反诈语音质检专家】。重庆行业卡用于拨打银行贷款营销、贷款催收、零售推销、房产中介等电话。\
 你的任务：根据通话录音转写的 ASR 文本（left: 主叫/外呼方，right: 被叫/用户），判断该通话是否高风险涉诈或违规，\
 并产出可供人工二次复核的结构化结论。"""
@@ -39,7 +42,7 @@ _OUTPUT = """最终输出要求：仅输出一个 JSON 对象（不要包裹代�
   "explanation": "判断说明，格式【违规/涉诈类型+分析】，简要概括具体违规行为，如：证券投资类：引导参与抱团股票投资，签合同，涉诈",
   "detected_features": ["命中的高危话术/特征"],
   "evidence_quotes": ["支撑判断的原文片段"],
-  "confidence": 0.0-1.0,
+  "confidence": 0.0-1.0,   // 按此标尺给分，避免一律给高分：>=0.95 仅当规范规则明确且唯一命中；0.8-0.95 主要规则命中但存在次要歧义（如子类目二选一）；0.6-0.8 规则间有冲突或关键信息缺失（如是否收费未说明）；<0.6 证据不足以支撑结论
   "analysis_thought": "你的推理链与依据（含参考了哪些规范小节/判例）"
 }
 正常场景：直接给出 is_violation=false、risk_level=合规、explanation 说明未识别到违规话术。"""

@@ -85,6 +85,26 @@ class Config:
         default_factory=lambda: os.getenv("QC_ESCALATE_ON_SIGNALS", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # 软信号（kNN判例冲突/低自报置信度）触发的选择性自一致性采样：
+    # 额外采样 K-1 次（temp>0），结论不一致则升级 tool loop。0=关闭。
+    self_consistency_k: int = field(
+        default_factory=lambda: int(os.getenv("QC_SELF_CONSISTENCY_K", "2"))
+    )
+    self_consistency_temperature: float = field(
+        default_factory=lambda: float(os.getenv("QC_SC_TEMPERATURE", "1.0"))
+    )
+    # kNN 判例冲突信号的最低相似度门槛（低于此相似度的邻居不作为旁证）。
+    knn_signal_min_sim: float = field(
+        default_factory=lambda: float(os.getenv("QC_KNN_SIGNAL_MIN_SIM", "0.25"))
+    )
+    # 自报置信度低于该值视为软信号（触发自一致性复核，而非直接升级）。
+    soft_confidence_below: float = field(
+        default_factory=lambda: float(os.getenv("QC_SOFT_CONFIDENCE_BELOW", "0.9"))
+    )
+    # 判正常但技能路由 top-1 为涉诈技能且分数≥该阈值时，视为软信号（潜在灰区漏判）。
+    route_fraud_signal_min: float = field(
+        default_factory=lambda: float(os.getenv("QC_ROUTE_FRAUD_SIGNAL_MIN", "0.25"))
+    )
 
     # ---- 场景技能库（渐进式披露）----
     skills_dir: Path = field(
