@@ -377,10 +377,14 @@ QC 把 17 个类目各做成一个技能文件，system prompt 只常驻技能�
    可独立完成，直接消掉实测中的 3/11 负例误报。改动面：`qc_agent/heuristic.py`、
    `knowledge/rules.json`、可选 `qc_agent/verify.py`。
 3. **合流确定性层**。把 HY 的 `rule_engine` + `evidence_extractor` 作为 QC 的一个新工具/前置
-   通道接入，规则候选结论作为 prompt 上下文与 `_finalize` 的兜底下界（当前 QC 只有
-   「涉诈→高风险」的向上兜底，缺少「规则已判高风险但 LLM 判正常」的向上兜底，
-   这正是 HY `_fuse` 的 `rule_llm_conflict` 分支）。改动面：新增依赖 PyYAML，
-   `qc_agent/agent.py`、`qc_agent/tools.py`。
+   通道接入，规则候选结论既作为 prompt 上下文，也作为 `_finalize` 的风险下界。
+   注意两者处理「确定性通道与 LLM 冲突」的方式不同：QC 目前是**升级重跑**
+   （硬信号 2「启发式命中涉诈但 LLM 判正常」→ 转 tool loop 复核），而 `_finalize` 里的
+   确定性改写只做内部一致性归一（涉诈→高风险→违规），不会依据独立通道抬高等级；
+   HY 的 `_fuse` 则**直接覆盖**（`rule_llm_conflict` 分支把风险抬到规则候选并强制送审）。
+   升级重跑精度更高但成本是一次完整重跑，直接覆盖成本为零但依赖规则精确率——
+   合流后可分层使用：规则精确率高的类目直接覆盖，灰区仍走升级。
+   改动面：新增依赖 PyYAML，`qc_agent/agent.py`、`qc_agent/tools.py`。
 4. **合流测试**。QC 85 项 + HY 44 条黄金样本（含 `expect_not_rules` 负例）+ FakeLLM 融合矩阵，
    并给两边补 CI（目前都没有 `.github/`）。
 5. **可选：异常通道**。按 HY V2 文档实现 PyOD 通道（步骤 7–10），严格遵守
