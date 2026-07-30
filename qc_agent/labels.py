@@ -129,6 +129,12 @@ def normalize_label(comment: str) -> Set[str]:
     if not text:
         return set()
     cats: Set[str] = set()
+    # 规范类目全名直接命中（人工标签直接写类目名时最高优先，避免被子串关键词稀释）。
+    for cat in VIOLATION_CATEGORIES | FRAUD_CATEGORIES:
+        if cat.lower() in text:
+            cats.add(cat)
+    if cats:
+        return cats
     for kw, cat in _KEYWORD_TO_CATEGORY:
         if kw.lower() in text:
             cats.add(cat)

@@ -39,8 +39,12 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
+        temperature: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """返回归一化后的 assistant message：{'content', 'tool_calls', 'raw'}。"""
+        """返回归一化后的 assistant message：{'content', 'tool_calls', 'raw'}。
+
+        temperature 可按调用覆盖（自一致性采样需 >0 的多样性）。
+        """
         if not self.available:
             raise RuntimeError(
                 "LLM 不可用：请安装 openai 并配置 LLM_API_KEY。" + (self._import_error or "")
@@ -49,7 +53,9 @@ class LLMClient:
         kwargs: Dict[str, Any] = {
             "model": self.config.llm_model,
             "messages": messages,
-            "temperature": self.config.llm_temperature,
+            "temperature": (
+                self.config.llm_temperature if temperature is None else temperature
+            ),
             "max_tokens": self.config.llm_max_tokens,
         }
         if tools:

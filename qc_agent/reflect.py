@@ -225,6 +225,12 @@ class ReflectAgent:
             rules["evolved_examples"] = evolved[-self.max_evolved :]
 
         self.kb.save_rules(rules)
+        # 演进定向落盘：错题写进对应类目技能文件的错题本区，
+        # 只有该类目被路由命中时才进入上下文，不污染无关场景。
+        if getattr(self.kb, "skills_available", False) and category:
+            note = (proposal.reflection_notes or proposal.pattern_update or human_label or "").strip()
+            if note:
+                self.kb.skills.append_errata(category, f"{note}（案例片段：{(content or '')[:80]}…）")
         return True
 
     # ---------- 冲突扫描（标签治理用，默认不改 rules） ----------

@@ -7,7 +7,7 @@
 评估指标：
   - 违规检出：以 comment 非空为人工违规代理标签，统计 P/R/F1。
   - 类目准确率：预测 scene_category 是否落入人工标签归一化后的可接受类目集。
-  - 涉诈准确率：人工标签可判定涉诈时，比对 is_fraud。
+  - 涉诈准确率：人工标签可判定涉诈时，比对 is_fraud（--fraud 宽口径下预测违规也计为涉诈）。
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--dedup-threshold", type=float, default=0.9, help="去重相似度阈值")
     parser.add_argument("--cache", action="store_true", help="启用结果缓存（按内容哈希）")
     parser.add_argument("--cache-path", default=".cache/qc_results.jsonl", help="缓存文件路径")
+    parser.add_argument("--fraud", action="store_true", help="涉诈宽口径：计算涉诈判定准确率时预测为违规也计为涉诈")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -68,7 +69,7 @@ def main() -> int:
 
     print(
         f"质检模式：{agent.mode} | 工具模式：{use_tools} | 并发：{workers} | "
-        f"去重：{args.dedup} | 缓存：{bool(config.cache_path)} | "
+        f"去重：{args.dedup} | 缓存：{bool(config.cache_path)} | 涉诈宽口径：{args.fraud} | "
         f"样本：{len(items)}/{len(store)} | 数据：{csv_path}"
     )
 
@@ -113,8 +114,16 @@ def main() -> int:
             res = InspectionResult.from_dict(base.to_dict())
             res.data_id = case.data_id
             res.source = base.source + "(dedup)"
-        acceptable = normalize_label(case.comment)
-        exp_fraud = expected_is_fraud(case.comment)
+        # 人工标签明确为正常/合规时，违规判定已由 TP/TN 统计覆盖，
+        # 不再参与类目/涉诈准确率（否则『正常，对本人催收』会因关键词
+        # 『催收』被归一化出可接受类目，制造伪冲突）。
+        if is_compliant_label(case.comment):
+            acceptable, exp_fraud = set(), None
+        else:
+            acceptable = normalize_label(case.comment)
+            exp_fraud = expected_is_fraud(case.comment)
+        # --fraud 宽口径：预测为违规也计为涉诈（兼容旧口径全标涉诈的测试集）。
+        pred_fraud = res.is_fraud or (args.fraud and res.is_violation)
         rows.append(
             {
                 "data_id": case.data_id,
@@ -128,9 +137,10 @@ def main() -> int:
                 "acceptable_categories": "|".join(sorted(acceptable)),
                 "category_correct": category_matches(res.scene_category, acceptable),
                 "expected_fraud": "" if exp_fraud is None else exp_fraud,
-                "fraud_correct": "" if exp_fraud is None else (res.is_fraud == exp_fraud),
+                "fraud_correct": "" if exp_fraud is None else (pred_fraud == exp_fraud),
                 "explanation": res.explanation,
                 "confidence": round(res.confidence, 3),
+                "review_flags": "；".join(res.review_flags),
                 "source": res.source,
             }
         )

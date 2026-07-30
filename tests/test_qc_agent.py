@@ -275,6 +275,265 @@ class TestHeuristicInspection(unittest.TestCase):
         self.assertTrue(any("添加方向" in e for e in entries))
 
 
+class TestSkills(unittest.TestCase):
+    def setUp(self):
+        from qc_agent.skills import SkillLibrary
+
+        self.cfg = Config()
+        self.lib = SkillLibrary(self.cfg.skills_dir)
+
+    def test_all_categories_loaded_as_skills(self):
+        kb = KnowledgeBase(self.cfg.spec_path, self.cfg.rules_path)
+        expected = {
+            s.get("category")
+            for bucket in ("violation_scenarios", "fraud_scenarios")
+            for s in kb.rules.get(bucket, [])
+        }
+        loaded = {s.name for s in self.lib.skills}
+        self.assertEqual(expected, loaded)
+
+    def test_parse_frontmatter(self):
+        from qc_agent.skills import parse_skill_md
+
+        skill = parse_skill_md(
+            "---\nname: 测试技能\nbucket: 涉诈场景\nrisk: 高风险\n"
+            "triggers: 甲, 乙, 丙\ndescription: 描述\n---\n\n## 判断方法\n正文"
+        )
+        self.assertEqual(skill.name, "测试技能")
+        self.assertEqual(skill.triggers, ["甲", "乙", "丙"])
+        self.assertIn("判断方法", skill.body)
+
+    def test_route_hits_expected_skill(self):
+        top = self.lib.route("支付宝芝麻信用分六百多，在租机小程序下一单手机寄给回收商折价周转", 3)
+        self.assertTrue(top)
+        self.assertEqual(top[0][0].name, "手机租赁套路贷诈骗")
+        top2 = self.lib.route("人工审核通过了，添加我们放款经理的企业微信走线上放款", 3)
+        self.assertEqual(top2[0][0].name, "引导贷款用户添加第三方微信")
+
+    def test_skill_embeds_disambiguation(self):
+        skill = self.lib.get("手机租赁套路贷诈骗")
+        self.assertIn("消歧", skill.body)
+        self.assertIn("芝麻", skill.body)
+
+    def test_errata_append_and_reload(self):
+        import shutil, tempfile
+        from qc_agent.skills import SkillLibrary
+
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            shutil.copytree(self.cfg.skills_dir, tmp / "skills")
+            lib = SkillLibrary(tmp / "skills")
+            before = lib.digest()
+            self.assertTrue(lib.append_errata("证券投资类", "测试错题条目"))
+            self.assertIn("测试错题条目", lib.get("证券投资类").body)
+            self.assertNotEqual(before, lib.digest())  # 指纹变化 -> 缓存失效
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_slim_prompt_smaller_and_has_catalog(self):
+        from qc_agent.prompts import build_system_prompt_fast
+
+        kb_skills = KnowledgeBase(
+            self.cfg.spec_path, self.cfg.rules_path, skills_dir=self.cfg.skills_dir
+        )
+        kb_legacy = KnowledgeBase(self.cfg.spec_path, self.cfg.rules_path)
+        slim = build_system_prompt_fast(kb_skills)
+        legacy = build_system_prompt_fast(kb_legacy)
+        self.assertLess(len(slim), len(legacy))
+        self.assertIn("场景技能目录", slim)
+        self.assertIn("业务口径判定表", slim)  # 合规守门行保持全局常驻
+
+    def test_load_skill_tool(self):
+        from qc_agent.tools import ToolRegistry
+
+        kb = KnowledgeBase(
+            self.cfg.spec_path, self.cfg.rules_path, skills_dir=self.cfg.skills_dir
+        )
+        tools = ToolRegistry(kb)
+        out = tools.dispatch("load_skill", {"name": "套路运诈骗"})
+        self.assertIn("800元", out)
+        miss = tools.dispatch("load_skill", {"name": "不存在的技能"})
+        self.assertIn("可选技能", miss)
+
+    def test_build_skills_idempotent(self):
+        import subprocess, sys as _sys
+
+        out = subprocess.run(
+            [_sys.executable, "scripts/build_skills.py", "--dry-run"],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("0 changed", out.stdout)
+
+
+class TestEvidenceVerify(unittest.TestCase):
+    def test_exact_and_punctuation_insensitive(self):
+        from qc_agent.verify import verify_evidence
+
+        content = "left:您好，这边是南方航空，您的航班因设备故障取消了！right:好的。"
+        ratio, missing = verify_evidence(["这边是南方航空", "航班因设备故障取消"], content)
+        self.assertEqual(ratio, 1.0)
+        self.assertFalse(missing)
+
+    def test_fabricated_quote_fails(self):
+        from qc_agent.verify import verify_evidence
+
+        content = "left:您好，宽带续费两年送三个月，帮您登记。"
+        ratio, missing = verify_evidence(["引导添加炒股福利群领取牛股名单"], content)
+        self.assertEqual(ratio, 0.0)
+        self.assertEqual(len(missing), 1)
+
+    def test_ellipsis_segments(self):
+        from qc_agent.verify import verify_evidence
+
+        content = "left:把支付宝打开，我一步步教您领取延误赔付金，先下载会议软件。"
+        ratio, _ = verify_evidence(["把支付宝打开…下载会议软件"], content)
+        self.assertEqual(ratio, 1.0)
+
+    def test_no_quotes_passes(self):
+        from qc_agent.verify import verify_evidence
+
+        self.assertEqual(verify_evidence([], "任意内容")[0], 1.0)
+
+    def test_finalize_flags_unverified_violation(self):
+        cfg = _offline_config()
+        agent = QcAgent(config=cfg, cases=CaseStore(cfg.cases_path))
+        payload = (
+            '{"is_violation": true, "is_fraud": true, "risk_level": "高风险",'
+            '"scene_category": "证券投资类", "scene_subtype": "", "explanation": "x",'
+            '"evidence_quotes": ["加入官方福利群领取牛股"], "confidence": 0.9}'
+        )
+        res = agent._finalize(payload, "left:您好，您家宽带到期了，续费两年送三个月。", None, "llm-fast")
+        self.assertIs(res.evidence_verified, False)
+        ok = agent._finalize(
+            '{"is_violation": true, "is_fraud": false, "risk_level": "低风险",'
+            '"scene_category": "贷款相关", "explanation": "x",'
+            '"evidence_quotes": ["百分之百放款，不看征信"], "confidence": 0.9}',
+            "left:我们这边百分之百放款，不看征信不查大数据。", None, "llm-fast",
+        )
+        self.assertIs(ok.evidence_verified, True)
+
+
+class TestEscalationSignals(unittest.TestCase):
+    def setUp(self):
+        cfg = _offline_config()
+        cfg.escalate_on_signals = True
+        self.agent = QcAgent(config=cfg, cases=CaseStore(cfg.cases_path))
+
+    def test_evidence_failure_triggers(self):
+        res = InspectionResult(
+            is_violation=True, is_fraud=True, risk_level=RiskLevel.HIGH,
+            scene_category="证券投资类", evidence_verified=False, source="llm-fast",
+        )
+        reason = self.agent._escalation_reason(res, "left:随便什么内容")
+        self.assertIn("证据引用未在原文命中", reason)
+
+    def test_heuristic_fraud_conflict_triggers(self):
+        res = InspectionResult(is_violation=False, scene_category="正常", source="llm-fast")
+        fraud_text = (
+            "left:我是投顾客服，联合上海证券在企辽通创建官方福利群，"
+            "关注官方接待员的服务号，领取服务置顶取消免打扰。"
+        )
+        reason = self.agent._escalation_reason(res, fraud_text)
+        self.assertIn("启发式命中涉诈关键词", reason)
+
+    def test_repair_source_triggers(self):
+        res = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW,
+                               scene_category="贷款相关", source="llm-fast-repair")
+        self.assertIn("JSON修复", self.agent._escalation_reason(res, "x"))
+
+    def test_clean_result_no_escalation(self):
+        res = InspectionResult(
+            is_violation=True, is_fraud=False, risk_level=RiskLevel.LOW,
+            scene_category="贷款相关", evidence_verified=True, source="llm-fast",
+            confidence=0.95,
+        )
+        self.assertEqual(self.agent._escalation_reason(res, "left:正常贷款推销内容"), "")
+
+    def test_signals_disabled_by_config(self):
+        cfg = _offline_config()
+        cfg.escalate_on_signals = False
+        agent = QcAgent(config=cfg, cases=CaseStore(cfg.cases_path))
+        res = InspectionResult(
+            is_violation=True, is_fraud=True, risk_level=RiskLevel.HIGH,
+            scene_category="证券投资类", evidence_verified=False, source="llm-fast",
+        )
+        self.assertEqual(agent._escalation_reason(res, "x"), "")
+
+    def test_verdict_key_normalizes_category_punctuation(self):
+        """『机票退、改签诈骗』与『机票退改签诈骗』应视为同一结论（采样一致性比较）。"""
+        from qc_agent.agent import _verdict_key
+
+        a = InspectionResult(is_violation=True, is_fraud=True,
+                             risk_level=RiskLevel.HIGH, scene_category="机票退、改签诈骗")
+        b = InspectionResult(is_violation=True, is_fraud=True,
+                             risk_level=RiskLevel.HIGH, scene_category="机票退改签诈骗")
+        self.assertEqual(_verdict_key(a), _verdict_key(b))
+
+    def test_knn_conflict_neighbors_fraud_but_llm_normal(self):
+        """高相似判例均为涉诈而 LLM 判正常时，应产生软信号。"""
+        import tempfile, shutil, csv as _csv
+
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            p = tmp / "cases.csv"
+            with p.open("w", encoding="utf-8-sig", newline="") as f:
+                w = _csv.DictWriter(f, fieldnames=["data_id", "content", "comment"])
+                w.writeheader()
+                for i in range(3):
+                    w.writerow({
+                        "data_id": f"k{i}",
+                        "content": "我是投顾客服，加入官方福利群，关注官方接待员服务号领取牛股名单",
+                        "comment": "证券投资类，涉诈",
+                    })
+            cfg = _offline_config()
+            cfg.cases_path = p
+            agent = QcAgent(config=cfg, cases=CaseStore(p))
+            res = InspectionResult(is_violation=False, scene_category="正常", source="llm-fast")
+            sig = agent._knn_conflict(
+                res, "我是投顾客服，加入官方福利群，关注官方接待员服务号领取牛股名单"
+            )
+            self.assertIn("均为涉诈但当前判正常", sig)
+            # 结论同向（涉诈）时不应报冲突。
+            res2 = InspectionResult(is_violation=True, is_fraud=True,
+                                    risk_level=RiskLevel.HIGH, scene_category="证券投资类")
+            self.assertEqual(agent._knn_conflict(
+                res2, "我是投顾客服，加入官方福利群，关注官方接待员服务号领取牛股名单"), "")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_soft_signal_low_confidence(self):
+        res = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW,
+                               scene_category="贷款相关", confidence=0.7, source="llm-fast")
+        soft = self.agent._soft_signals(res, "left:一段普通贷款推销话术")
+        self.assertTrue(any("自报置信度" in s for s in soft))
+        res.confidence = 0.97
+        soft2 = self.agent._soft_signals(res, "left:一段普通贷款推销话术")
+        self.assertFalse(any("自报置信度" in s for s in soft2))
+
+    def test_route_fraud_conflict_signal(self):
+        """判正常但内容路由到涉诈技能且分数过阈，应产生软信号；正常内容不应误触。"""
+        normal_verdict = InspectionResult(is_violation=False, scene_category="正常")
+        gray = (
+            "哥，装修贷这个事情，银行那边要求资金要有个走向说明，"
+            "可能需要您家里人配合签个字，具体流程到时候看银行安排。"
+        )
+        sig = self.agent._route_fraud_conflict(normal_verdict, gray)
+        self.assertIn("涉诈技能", sig)
+        benign = "您好，您的快递到小区驿站了，取件码八八二一，晚上九点前来取。"
+        self.assertEqual(self.agent._route_fraud_conflict(normal_verdict, benign), "")
+        # 已判违规的结论不需要该信号。
+        vio = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW, scene_category="贷款相关")
+        self.assertEqual(self.agent._route_fraud_conflict(vio, gray), "")
+
+    def test_review_flags_round_trip(self):
+        res = InspectionResult(is_violation=True, risk_level=RiskLevel.LOW,
+                               scene_category="贷款相关", review_flags=["测试信号"])
+        d = res.to_dict()
+        self.assertEqual(d["review_flags"], ["测试信号"])
+        self.assertEqual(InspectionResult.from_dict(d).review_flags, ["测试信号"])
+
+
 class TestSchema(unittest.TestCase):
     def test_round_trip(self):
         res = InspectionResult(

@@ -23,15 +23,28 @@ from .config import Config, DEFAULT_CONFIG
 from .heuristic import HeuristicInspector
 from .knowledge_base import KnowledgeBase
 from .llm import LLMClient
+from .labels import expected_is_fraud, is_compliant_label
 from .prompts import (
     _JSON_FORCE,
     _JSON_REPAIR,
+    PROMPT_VERSION,
     build_fast_user_message,
     build_system_prompt,
     build_system_prompt_fast,
 )
+from .retrieval import _normalize
 from .schema import InspectionResult, RiskLevel
 from .tools import ToolRegistry
+from .verify import verify_evidence
+
+
+def _norm_category(cat: str) -> str:
+    """类目字符串归一化比较（『机票退、改签诈骗』==『机票退改签诈骗』）。"""
+    return _normalize(cat or "")
+
+
+def _verdict_key(res: InspectionResult):
+    return (res.is_fraud, res.is_violation, _norm_category(res.scene_category))
 
 
 def _truncate(content: str, max_chars: int) -> str:
@@ -131,6 +144,7 @@ class QcAgent:
         self.kb = kb or KnowledgeBase(
             self.config.spec_path,
             self.config.rules_path,
+            skills_dir=self.config.skills_dir if self.config.use_skills else None,
         )
         self.cases = cases if cases is not None else CaseStore(self.config.cases_path)
         self.llm = LLMClient(self.config)
@@ -141,8 +155,11 @@ class QcAgent:
         self.verbose = verbose
         self.cache: Optional[ResultCache] = None
         if self.config.cache_path:
-            # 知识指纹纳入缓存命名空间：rules/规则/判定表变更后旧缓存自动失效，避免陈旧结论。
-            kb_fp = hashlib.sha1(self.kb.rules_brief().encode("utf-8")).hexdigest()[:10]
+            # 知识指纹纳入缓存命名空间：rules/技能/prompt 变更后旧缓存自动失效，避免陈旧结论。
+            fp_src = self.kb.rules_brief() + PROMPT_VERSION
+            if self.kb.skills_available:
+                fp_src += self.kb.skills.digest()
+            kb_fp = hashlib.sha1(fp_src.encode("utf-8")).hexdigest()[:10]
             self.cache = ResultCache(
                 Path(self.config.cache_path), self.config.llm_model, f"{self.mode}:{kb_fp}"
             )
@@ -178,13 +195,7 @@ class QcAgent:
             if tool_mode:
                 res = self._inspect_with_llm(content, data_id=data_id)
             else:
-                res = self._inspect_fast(content, data_id=data_id)
-                # 两阶段：快速模式低置信度时升级到完整工具回路复核。
-                threshold = self.config.escalate_below_confidence
-                if threshold > 0 and 0 < res.confidence < threshold:
-                    if self.verbose:
-                        print(f"[escalate] 置信度 {res.confidence:.2f} < {threshold}，升级工具模式复核")
-                    res = self._inspect_with_llm(content, data_id=data_id)
+                res = self._quality_gated_fast(content, data_id)
         except Exception as exc:  # pragma: no cover - LLM 调用失败时兜底
             if self.verbose:
                 print(f"[warn] LLM 质检失败，回退启发式：{exc}")
@@ -196,13 +207,154 @@ class QcAgent:
             self.cache.set(cache_ns + "\n" + content, res.to_dict())
         return res
 
+    # ---------- 不确定性信号与质量门控 ----------
+    #
+    # 实测（deepseek 推理模型）：自报 confidence 饱和在 0.95-1.0；终答 token 的
+    # logprob 被推理过程坍缩（连『抛硬币是否正面』都给 P=1.0）；K=3 重采样一致率
+    # 也基本饱和。因此不确定性来自**独立视角的旁证**而非模型自身：
+    #   硬信号（直接升级 tool loop）：证据校验失败 / 启发式涉诈冲突 / JSON修复兜底；
+    #   软信号（先做选择性自一致性采样，采样分歧才升级）：kNN 判例冲突 / 低自报置信度。
+    def _hard_signals(self, res: InspectionResult, content: str) -> List[str]:
+        signals: List[str] = []
+        if self.config.escalate_on_signals:
+            if res.evidence_verified is False:
+                signals.append("违规结论的证据引用未在原文命中")
+            if not res.is_violation:
+                heur = self.heuristic.inspect(content)
+                if heur.is_fraud:
+                    signals.append(
+                        f"启发式命中涉诈关键词（{heur.scene_category}）但LLM判正常"
+                    )
+            if res.source.endswith("-repair") or res.source == "llm+heuristic":
+                signals.append("输出经JSON修复/兜底")
+        threshold = self.config.escalate_below_confidence
+        if threshold > 0 and 0 < res.confidence < threshold:
+            signals.append(f"置信度{res.confidence:.2f}低于硬阈值{threshold}")
+        return signals
+
+    # 兼容旧接口/测试：返回硬信号的拼接串。
+    def _escalation_reason(self, res: InspectionResult, content: str) -> str:
+        return "；".join(self._hard_signals(res, content))
+
+    def _knn_conflict(self, res: InspectionResult, content: str) -> str:
+        """kNN 判例冲突：高相似历史判例的人工标签与当前结论方向相反。"""
+        if not self.cases or len(self.cases) == 0:
+            return ""
+        hits = self.cases.retrieve_with_scores(content, top_k=3, exclude_id=res.data_id)
+        strong = [(c, s) for c, s in hits if s >= self.config.knn_signal_min_sim]
+        if len(strong) < 2:
+            return ""
+        frauds = [expected_is_fraud(c.comment) for c, _ in strong]
+        compliants = [is_compliant_label(c.comment) for c, _ in strong]
+        if not res.is_violation and all(f is True for f in frauds):
+            return f"{len(strong)}条高相似历史判例均为涉诈但当前判正常"
+        if res.is_fraud and all(compliants):
+            return f"{len(strong)}条高相似历史判例均为合规但当前判涉诈"
+        return ""
+
+    def _route_fraud_conflict(self, res: InspectionResult, content: str) -> str:
+        """判正常但内容路由到涉诈技能（灰区漏判的实测特征，如 ab贷要素若隐若现）。"""
+        if res.is_violation or not self.kb.skills_available:
+            return ""
+        routed = self.kb.skills.route(content, top_k=1)
+        if not routed:
+            return ""
+        skill, score = routed[0]
+        if skill.bucket == "涉诈场景" and score >= self.config.route_fraud_signal_min:
+            return f"内容路由到涉诈技能『{skill.name}』(score={score:.2f})但判正常"
+        return ""
+
+    def _soft_signals(self, res: InspectionResult, content: str) -> List[str]:
+        signals: List[str] = []
+        if not self.config.escalate_on_signals:
+            return signals
+        knn = self._knn_conflict(res, content)
+        if knn:
+            signals.append(knn)
+        route = self._route_fraud_conflict(res, content)
+        if route:
+            signals.append(route)
+        soft_conf = self.config.soft_confidence_below
+        if soft_conf > 0 and 0 < res.confidence < soft_conf:
+            signals.append(f"自报置信度{res.confidence:.2f}低于{soft_conf}")
+        return signals
+
+    def _self_consistency_agrees(
+        self, content: str, data_id: Optional[str], base: InspectionResult
+    ) -> bool:
+        """额外采样 K-1 次（temp>0），核心结论（涉诈/违规/类目）是否全部一致。"""
+        extra = max(0, self.config.self_consistency_k - 1)
+        base_key = _verdict_key(base)
+        for _ in range(extra):
+            sample = self._inspect_fast(
+                content,
+                data_id=data_id,
+                temperature=self.config.self_consistency_temperature,
+            )
+            if _verdict_key(sample) != base_key:
+                return False
+        return True
+
+    def _quality_gated_fast(self, content: str, data_id: Optional[str]) -> InspectionResult:
+        """fast 结论 → 硬信号直接升级；软信号先自一致性采样，分歧才升级。"""
+        res = self._inspect_fast(content, data_id=data_id)
+
+        hard = self._hard_signals(res, content)
+        if hard:
+            reason = "；".join(hard)
+            if self.verbose:
+                print(f"[escalate] 硬信号：{reason}，升级工具模式复核")
+            escalated = self._inspect_with_llm(content, data_id=data_id)
+            escalated.source = "llm-escalated"
+            escalated.review_flags = hard
+            escalated.analysis_thought = (
+                f"[升级复核触发原因] {reason}\n" + escalated.analysis_thought
+            ).strip()
+            return escalated
+
+        soft = self._soft_signals(res, content)
+        if soft and self.config.self_consistency_k > 1:
+            if self._self_consistency_agrees(content, data_id, res):
+                # 采样一致：保留结论，记录软信号已复核通过。
+                res.review_flags = [f"[已复核通过] {s}" for s in soft]
+                return res
+            reason = "；".join(soft) + "；自一致性采样结论不一致"
+            if self.verbose:
+                print(f"[escalate] 软信号：{reason}，升级工具模式复核")
+            escalated = self._inspect_with_llm(content, data_id=data_id)
+            escalated.source = "llm-escalated"
+            escalated.review_flags = soft + ["自一致性采样结论不一致"]
+            escalated.analysis_thought = (
+                f"[升级复核触发原因] {reason}\n" + escalated.analysis_thought
+            ).strip()
+            return escalated
+        res.review_flags = soft
+        return res
+
     # ---------- 快速模式：检索增强单轮 ----------
     def _disambig_block(self, clipped: str) -> str:
         """分层注入：system prompt 只常驻消歧标题索引，命中的正文随待检文本给出。"""
         entries = self.kb.relevant_disambiguation(clipped, top_k=self.config.disambig_top_k)
         return "\n".join(f"- {e}" for e in entries)
 
-    def _inspect_fast(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
+    def _skills_block(self, clipped: str) -> str:
+        """技能路由：按通话内容选 top-k 场景技能，注入完整判定细则。"""
+        if not self.kb.skills_available:
+            return ""
+        routed = self.kb.skills.route(clipped, top_k=self.config.skills_top_k)
+        if not routed:
+            return ""
+        if self.verbose:
+            names = ", ".join(f"{s.name}({sc:.1f})" for s, sc in routed)
+            print(f"[skills] 路由命中: {names}")
+        return self.kb.skills.render([s for s, _ in routed])
+
+    def _inspect_fast(
+        self,
+        content: str,
+        data_id: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ) -> InspectionResult:
         clipped = _truncate(content, self.config.max_content_chars)
         # 排除当前样本自身，避免评估时把『标准答案』当相似判例泄漏给模型。
         similar_block = self.tools.dispatch(
@@ -211,16 +363,19 @@ class QcAgent:
         spec_block = self.tools.dispatch(
             "search_spec", {"query": clipped[:300], "top_k": 3}
         )
+        skills_block = self._skills_block(clipped)
+        # 技能已内嵌各自类目的消歧规则，启用技能时只补充未随技能注入的部分。
+        disambig_block = "" if skills_block else self._disambig_block(clipped)
         messages = [
             {"role": "system", "content": build_system_prompt_fast(self.kb)},
             {
                 "role": "user",
                 "content": build_fast_user_message(
-                    clipped, similar_block, spec_block, self._disambig_block(clipped)
+                    clipped, similar_block, spec_block, disambig_block, skills_block
                 ),
             },
         ]
-        msg = self.llm.chat(messages, tools=None)
+        msg = self.llm.chat(messages, tools=None, temperature=temperature)
         return self._finalize(msg["content"], content, data_id, source="llm-fast", messages=messages)
 
     # ---------- LLM agent loop ----------
@@ -342,4 +497,30 @@ class QcAgent:
             res.is_violation = True
         if res.risk_level.rank > 0:
             res.is_violation = True
+        # 类目归一化：模型偶发把真实类目落在 subtype，主类目写成泛化词
+        # （如『诈骗』）或错误大类（如涉诈结论主类目写『其他』）——提升 subtype。
+        sub = (res.scene_subtype or "").strip().strip("-/")
+        violation_cats = {
+            s.get("category") for s in self.kb.rules.get("violation_scenarios", [])
+        }
+        fraud_cats = {
+            s.get("category") for s in self.kb.rules.get("fraud_scenarios", [])
+        }
+        generic = {"诈骗", "涉诈", "违规", "违规场景", "涉诈类型"}
+        if sub in violation_cats | fraud_cats:
+            if res.scene_category in generic or (
+                res.is_fraud and res.scene_category not in fraud_cats and sub in fraud_cats
+            ):
+                res.scene_category, res.scene_subtype = sub, ""
+        # 证据校验：违规/涉诈结论的引用必须能在待检原文中命中（拦截 few-shot 照抄）。
+        if res.is_violation and res.evidence_quotes:
+            ratio, missing = verify_evidence(res.evidence_quotes, content)
+            res.evidence_verified = ratio > 0
+            if not res.evidence_verified:
+                res.analysis_thought = (
+                    "[证据校验失败] evidence_quotes 均未在待检原文中命中，"
+                    "结论可能照抄了相似判例/规范话术，需人工留意。\n" + res.analysis_thought
+                ).strip()
+                if self.verbose:
+                    print(f"[verify] 证据未命中原文: {missing[:2]}")
         return res

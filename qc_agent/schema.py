@@ -61,6 +61,10 @@ class InspectionResult:
     analysis_thought: str = ""
     source: str = "llm"  # llm | heuristic
     data_id: Optional[str] = None
+    # 证据校验结果：None=未校验；False=违规/涉诈结论但证据引用未在原文命中（需人工留意）。
+    evidence_verified: Optional[bool] = None
+    # 复核标记：触发过的不确定性信号（升级原因/自一致性分歧等），供人工复核队列筛选。
+    review_flags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -98,4 +102,6 @@ class InspectionResult:
             analysis_thought=str(payload.get("analysis_thought", "") or ""),
             source=str(payload.get("source", "llm") or "llm"),
             data_id=payload.get("data_id"),
+            evidence_verified=payload.get("evidence_verified"),
+            review_flags=list(payload.get("review_flags", []) or []),
         )
