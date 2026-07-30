@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Optional, Set
 
 # 规范类目（与 rules.json 对齐）。
@@ -114,11 +115,17 @@ _NON_FRAUD_HINTS = ("非涉诈", "操作提现", "帮退律所", "律所费用")
 # 业务口径：人工说明明确标注为合规/正常的（如『合规招商加盟』），不应计为违规。
 _COMPLIANT_HINTS = ("合规", "正常", "无违规", "无异常", "品牌招商加盟", "淘宝闪购", "商铺包租", "携号转网", "宽带续费")
 
+# 被否定的合规词（『不合规』『非正常』），子串匹配会把它们误读成合规标签，
+# 使真违规样本在评估中被当作合规基线，同时污染 kNN 判例冲突信号。
+_NEGATED_COMPLIANT = re.compile(r"(?:不|非|未|不太|不够|谈不上|算不上)\s*(?:合规|正常)")
+
 
 def is_compliant_label(comment: str) -> bool:
     """人工标签是否明确表示该通话合规（按业务口径不计为违规）。"""
     text = (comment or "").strip()
     if not text:
+        return False
+    if _NEGATED_COMPLIANT.search(text):
         return False
     return any(h in text for h in _COMPLIANT_HINTS)
 
