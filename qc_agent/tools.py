@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .case_store import CaseStore
 from .knowledge_base import KnowledgeBase
@@ -63,14 +63,13 @@ class ToolRegistry:
             return f"未找到技能『{name}』。可选技能：{names}"
         return f"### 技能：{skill.name}（{skill.bucket}·{skill.risk}）\n{skill.body}"
 
-    def _retrieve_similar_cases(
-        self, text: str, top_k: Optional[int] = None, exclude_id: Optional[str] = None
-    ) -> str:
+    def format_similar_cases(self, hits: Sequence[Tuple[Any, float]]) -> str:
+        """把 (判例, 相似度) 列表渲染为 few-shot 块。
+
+        独立出来供快速模式复用已检索好的结果，避免同一通话重复检索判例库。
+        """
         if not self.cases or len(self.cases) == 0:
             return "暂无人工标注判例库。"
-        hits = self.cases.retrieve_with_scores(
-            text, top_k=top_k or self.top_k, exclude_id=exclude_id
-        )
         if not hits:
             return "未检索到相似人工判例。"
         out = []
@@ -79,6 +78,16 @@ class ToolRegistry:
                 f"- 相似度{score:.2f} | 人工标签：{case.comment or '无'}\n  内容片段：{case.short(260)}"
             )
         return "检索到的相似人工复核判例（few-shot 参考）：\n" + "\n".join(out)
+
+    def _retrieve_similar_cases(
+        self, text: str, top_k: Optional[int] = None, exclude_id: Optional[str] = None
+    ) -> str:
+        if not self.cases or len(self.cases) == 0:
+            return "暂无人工标注判例库。"
+        hits = self.cases.retrieve_with_scores(
+            text, top_k=top_k or self.top_k, exclude_id=exclude_id
+        )
+        return self.format_similar_cases(hits)
 
     def _web_search_fraud(self, query: str) -> str:
         if self._web_search is None:

@@ -76,7 +76,11 @@ class HeuristicInspector:
         self.cases = cases
         self.top_k = top_k
 
-    def inspect(self, content: str, data_id: Optional[str] = None) -> InspectionResult:
+    def inspect(
+        self, content: str, data_id: Optional[str] = None, include_similar: bool = True
+    ) -> InspectionResult:
+        """include_similar=False 跳过判例检索（其结果只用于拼装 analysis_thought），
+        供只关心判定结论的调用方（如升级信号检测）省掉一次全库检索。"""
         text = content or ""
         norm = text.replace("\n", "").casefold()
 
@@ -133,7 +137,11 @@ class HeuristicInspector:
             if n >= 2 or risk == RiskLevel.HIGH:
                 candidates.append((risk, n, cat, subtype, hits, False))
 
-        similar = self.cases.retrieve(text, top_k=self.top_k, exclude_id=data_id) if self.cases else []
+        similar = (
+            self.cases.retrieve(text, top_k=self.top_k, exclude_id=data_id)
+            if (self.cases and include_similar)
+            else []
+        )
 
         if not candidates:
             res = InspectionResult(

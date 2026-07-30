@@ -836,5 +836,199 @@ class TestExtractJson(unittest.TestCase):
         self.assertEqual(obj["scene_category"], "贷款相关")
 
 
+class _StubLLM:
+    """可控的 LLM 替身：按顺序吐出预设回复，用完后重复最后一条。"""
+
+    available = True
+
+    def __init__(self, *replies: str):
+        self.replies = list(replies) or [""]
+        self.calls = 0
+
+    def chat(self, messages, tools=None, tool_choice="auto", temperature=None):
+        idx = min(self.calls, len(self.replies) - 1)
+        self.calls += 1
+        return {"content": self.replies[idx], "tool_calls": [], "raw": None}
+
+
+_GOOD_JSON = (
+    '{"is_violation": true, "is_fraud": true, "risk_level": "高风险",'
+    ' "scene_category": "证券投资类", "explanation": "引导炒股",'
+    ' "evidence_quotes": ["加老师微信带你炒股"], "confidence": 0.96}'
+)
+_BROKEN = "让我想想……{这不是完整 JSON"
+_FRAUD_TEXT = "left:加老师微信带你炒股，抱团买入操作。right:好的。" * 3
+
+
+class TestDegradedResultNotCached(unittest.TestCase):
+    """LLM 故障期的启发式兜底结论不得写入缓存，否则降级会被永久固化。"""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cache = self.tmp / "c.jsonl"
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _agent(self, llm):
+        cfg = _offline_config()
+        cfg.llm_api_key = "sk-test"  # 让 inspect 走 LLM 分支
+        cfg.cache_path = str(self.cache)
+        cfg.escalate_on_signals = False
+        agent = QcAgent(config=cfg, cases=CaseStore(cfg.cases_path))
+        agent.llm = llm
+        return agent
+
+    def test_fallback_result_is_not_cached_and_rerun_calls_llm(self):
+        broken = self._agent(_StubLLM(_BROKEN))
+        res = broken.inspect(_FRAUD_TEXT, data_id="P1")
+        broken.flush_cache()
+        self.assertEqual(res.source, "llm+heuristic")
+        self.assertFalse(self.cache.exists() and self.cache.stat().st_size > 0)
+
+        # LLM 恢复后重跑必须真正重新调用，而不是复用降级结论。
+        good = self._agent(_StubLLM(_GOOD_JSON))
+        res2 = good.inspect(_FRAUD_TEXT, data_id="P1")
+        self.assertGreater(good.llm.calls, 0)
+        self.assertEqual(res2.source, "llm-fast")
+
+    def test_normal_llm_result_is_still_cached(self):
+        first = self._agent(_StubLLM(_GOOD_JSON))
+        first.inspect(_FRAUD_TEXT, data_id="P2")
+        first.flush_cache()
+
+        second = self._agent(_StubLLM(_GOOD_JSON))
+        second.inspect(_FRAUD_TEXT, data_id="P2")
+        self.assertEqual(second.llm.calls, 0)
+
+    def test_escalated_fallback_keeps_heuristic_marker(self):
+        cfg = _offline_config()
+        cfg.llm_api_key = "sk-test"
+        cfg.cache_path = ""
+        cfg.escalate_on_signals = True
+        agent = QcAgent(config=cfg, cases=CaseStore(cfg.cases_path))
+        agent.llm = _StubLLM(_BROKEN)
+        res = agent.inspect(_FRAUD_TEXT, data_id="P3")
+        # 升级后仍是启发式兜底：source 必须保留 heuristic 痕迹，不能冒充 LLM 结论。
+        self.assertIn("heuristic", res.source)
+        self.assertIn("escalated", res.source)
+
+
+class TestLLMRetryPolicy(unittest.TestCase):
+    def test_client_errors_are_not_retried(self):
+        from qc_agent.llm import is_retryable
+
+        for msg in ("Error code: 401 - Incorrect API key provided",
+                    "Error code: 400 - maximum context length is 65536 tokens",
+                    "Error code: 404 - model not found"):
+            self.assertFalse(is_retryable(Exception(msg)), msg)
+
+    def test_transient_errors_are_retried(self):
+        from qc_agent.llm import is_retryable
+
+        for msg in ("Error code: 429 - Rate limit reached",
+                    "Error code: 500 - internal server error",
+                    "Connection reset by peer",
+                    "Request timed out"):
+            self.assertTrue(is_retryable(Exception(msg)), msg)
+
+    def test_structured_status_code_wins_over_message(self):
+        from qc_agent.llm import is_retryable
+
+        exc = Exception("something went wrong")
+        exc.status_code = 401
+        self.assertFalse(is_retryable(exc))
+        exc2 = Exception("something went wrong")
+        exc2.status_code = 503
+        self.assertTrue(is_retryable(exc2))
+
+    def test_retry_loop_stops_immediately_on_client_error(self):
+        from qc_agent.llm import LLMClient
+
+        cfg = Config()
+        cfg.llm_api_key = "sk-test"
+        cfg.llm_max_retries = 3
+        cfg.llm_retry_backoff = 0.01
+        client = LLMClient.__new__(LLMClient)
+        client.config = cfg
+        calls = {"n": 0}
+
+        class _Completions:
+            def create(self, **kwargs):
+                calls["n"] += 1
+                raise Exception("Error code: 401 - Incorrect API key provided")
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+        client._client = _Client()
+        with self.assertRaises(Exception):
+            client._create_with_retry({"model": "m", "messages": []})
+        self.assertEqual(calls["n"], 1)
+
+
+class TestNegatedCompliantLabel(unittest.TestCase):
+    """『不合规』被子串匹配读成合规，会让真违规样本变成评估基线里的合规样本。"""
+
+    def test_negated_labels_are_not_compliant(self):
+        from qc_agent.labels import is_compliant_label
+
+        for comment in ("不合规", "不正常", "非正常营销，引流第三方平台",
+                        "疑似不合规，加微信引流", "算不上合规"):
+            self.assertFalse(is_compliant_label(comment), comment)
+
+    def test_genuine_compliant_labels_still_recognized(self):
+        from qc_agent.labels import is_compliant_label
+
+        for comment in ("合规", "正常，对本人催收", "合规招商加盟", "无违规", "淘宝闪购"):
+            self.assertTrue(is_compliant_label(comment), comment)
+
+
+class TestFastContextReuse(unittest.TestCase):
+    """同一通话的判例检索与技能路由只应做一次，且结论口径不变。"""
+
+    def setUp(self):
+        cfg = _offline_config()
+        cfg.llm_api_key = "sk-test"
+        cfg.cache_path = ""
+        self.cfg = cfg
+
+    def _count_searches(self, content):
+        from qc_agent import retrieval
+
+        original = retrieval.TfidfIndex.search
+        count = {"n": 0}
+
+        def counting(self, query, top_k=3):
+            count["n"] += 1
+            return original(self, query, top_k=top_k)
+
+        retrieval.TfidfIndex.search = counting
+        try:
+            agent = QcAgent(config=self.cfg, cases=CaseStore(self.cfg.cases_path))
+            agent.llm = _StubLLM(
+                '{"is_violation": false, "is_fraud": false, "risk_level": "合规",'
+                ' "scene_category": "正常", "explanation": "正常", "confidence": 0.95}'
+            )
+            res = agent.inspect(content, data_id="Q1")
+        finally:
+            retrieval.TfidfIndex.search = original
+        return count["n"], res
+
+    def test_single_pass_does_not_repeat_retrieval(self):
+        # 判正常路径会走完硬信号 + 软信号（kNN/涉诈路由）全部检测。
+        n, res = self._count_searches("left:您好这边是贷款平台，您加一下我微信。right:好的。" * 4)
+        # 判例库 + 规范 + 技能各一次；复用生效则不超过 3 次。
+        self.assertLessEqual(n, 3, f"单次质检触发了 {n} 次索引检索，说明存在重复检索")
+        self.assertEqual(res.source, "llm-fast")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
