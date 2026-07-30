@@ -13,3 +13,13 @@ cache/
 
 # 真实人工标注语料（含业务数据，不入库）
 data/real_cases.csv
+
+# 中间结果与本地工具目录
+temp/
+.qoder/
+storage/
+
+# 大体积业务数据文件（不入库）
+chongqing20260720_train_00.csv
+重庆行业卡test252627.csv
+重庆行业卡对客反诈复核规范.xlsx
